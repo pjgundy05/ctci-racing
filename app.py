@@ -50,14 +50,16 @@ DEF_WEIGHTS = {
 
 DEFAULT_PP = 100
 DEFAULT_STYLE = ("P", 3)
-HORSE_SPLIT = re.compile(r"\n(?=\s*\d+\s+[A-Za-z][^\n]+?\()")
+
+# Allow program numbers like "1", "10", or "1A"
+HORSE_SPLIT = re.compile(r"\n(?=\s*\d+[A-Z]?\s+[A-Za-z][^\n]+?\()")
 
 # ---------- Helpers ----------
 def has_phrase(text, phrase):
-    return phrase.lower() in text.lower()
+    return phrase.lower() in (text or "").lower()
 
 def regex_found(text, pat):
-    return re.search(pat, text, flags=re.IGNORECASE) is not None
+    return re.search(pat, text or "", flags=re.IGNORECASE) is not None
 
 def safe_int(x, default=None):
     try:
@@ -67,7 +69,7 @@ def safe_int(x, default=None):
 
 # ---------- Race meta ----------
 def infer_race_meta(text):
-    t = text.lower()
+    t = (text or "").lower()
     if "(t)" in t or "turf" in t:
         surface = "TURF"
     elif " all weather" in t or " synthetic" in t or " aw " in t:
@@ -75,7 +77,7 @@ def infer_race_meta(text):
     else:
         surface = "DIRT"
 
-    head = "\n".join(text.splitlines()[:150]).lower()
+    head = "\n".join((text or "").splitlines()[:150]).lower()
     furlongs = None
     mf = re.search(r"\b(\d(?:\.\d)?)\s*f\b", head)
     if mf:
@@ -102,7 +104,7 @@ def infer_race_meta(text):
 
 # ---------- Parsing horses ----------
 def parse_style(first_line):
-    m = re.search(r"\((E\/P|E|P|S)\s*(\d+)?\)", first_line)
+    m = re.search(r"\((E\/P|E|P|S)\s*(\d+)?\)", first_line or "")
     if not m:
         return DEFAULT_STYLE
     style = "EP" if "E/P" in m.group(1) else m.group(1)
@@ -110,28 +112,17 @@ def parse_style(first_line):
     return style, rating
 
 def extract_prime_power(block):
-    # More forgiving regex variants to tolerate OCR quirks
-    m = re.search(r"Prime\s*Power[:\s]*([\d\.]+)", block, flags=re.IGNORECASE)
+    # Forgiving patterns (OCR often mangles spacing/colon)
+    m = re.search(r"Prime\s*Power[:\s]*([\d\.]+)", block or "", flags=re.IGNORECASE)
     if m and m.group(1):
         return safe_int(m.group(1), DEFAULT_PP)
-    m2 = re.search(r"(?:PP|Prime\s*Powe?r)\D{0,6}([\d]{2,3})", block, flags=re.IGNORECASE)
+    m2 = re.search(r"(?:PP|Prime\s*Powe?r)\D{0,6}([\d]{2,3})", block or "", flags=re.IGNORECASE)
     if m2 and m2.group(1):
         return safe_int(m2.group(1), DEFAULT_PP)
-    return DEFAULT_PP  # never crash
+    return DEFAULT_PP  # fallback, never crash
 
 def detect_sharp_work(block):
-    # bullet-like patterns
     return regex_found(block, r"\bB\s*1\/\d+") or regex_found(block, r"\b1\/\d+\b")
-
-def split_pdf_into_races(text):
-    chunks = re.split(r"\bRace\s+\d+\b", text, flags=re.IGNORECASE)
-    headers = re.findall(r"\bRace\s+\d+\b", text, flags=re.IGNORECASE)
-    races = []
-    for i, chunk in enumerate(chunks[1:], start=0):
-        races.append((headers[i], chunk))
-    if not races:
-        races = [("Race", text)]
-    return races
 
 def extract_horses_from_text(text):
     blocks = HORSE_SPLIT.split(text or "")
@@ -145,9 +136,9 @@ def extract_horses_from_text(text):
         lines = block.splitlines()
         first = lines[0] if lines else ""
 
-        # Heuristic: if it doesn't look like a horse card, skip it
+        # Looks like a horse card?
         looks_like_card = (
-            re.search(r"^\s*\d+\s+[A-Za-z'’\-\. ]+\s*\(", first) or
+            re.search(r"^\s*\d+[A-Z]?\s+[A-Za-z'’\-\. ]+\s*\(", first or "") or
             ("Prime Power" in block) or
             re.search(r"\((E\/P|E|P|S)\s*\d*", first or "", flags=re.IGNORECASE)
         )
@@ -155,16 +146,14 @@ def extract_horses_from_text(text):
             continue
 
         # Name
-        nm = re.match(r"\s*\d+\s+([A-Za-z'’\-\. ]+)\s*\(", first)
+        nm = re.match(r"\s*\d+[A-Z]?\s+([A-Za-z'’\-\. ]+)\s*\(", first or "")
         name = nm.group(1).strip() if nm else "Unknown"
 
         # Style
-        style, style_rt = parse_style(first)
+        style, style_rt = parse_style(first or "")
 
         # Prime Power (safe)
-        pp = extract_prime_power(block)
-        if pp is None:
-            pp = DEFAULT_PP
+        pp = extract_prime_power(block) or DEFAULT_PP
 
         horses.append({
             "Horse": name,
@@ -176,11 +165,13 @@ def extract_horses_from_text(text):
         })
 
     # Deduplicate by Horse name (PDF artifacts can duplicate)
+    if not horses:
+        return []
     return pd.DataFrame(horses).drop_duplicates(subset=["Horse"]).to_dict("records")
 
 # ---------- Pace ----------
 def build_pace_context(horses, hot_threshold=4):
-    pressers = [h for h in horses if h["Style"] in ("E","EP") and h["StyleRating"] >= 5]
+    pressers = [h for h in horses if h["Style"] in ("E","EP") and (h["StyleRating"] or 0) >= 5]
     return {
         "num_pressers": len(pressers),
         "lone_speed": len(pressers) == 1,
@@ -194,14 +185,14 @@ def score_surface_distance_fit(block, surface, w):
     if surface == "TURF":
         if has_phrase(block, "Best Turf Speed"): pts += w["fit_turf_best"]
         if has_phrase(block, "Turf starts"): pts += w["fit_turf_ok"]
-        if "Sire Stats:" in block and "Turf" in block: pts += w["fit_turf_sire"]
-        if "Dam'sSire" in block and "Turf" in block: pts += w["fit_turf_damsire"]
+        if "Sire Stats:" in (block or "") and "Turf" in (block or ""): pts += w["fit_turf_sire"]
+        if "Dam'sSire" in (block or "") and "Turf" in (block or ""): pts += w["fit_turf_damsire"]
     elif surface == "DIRT":
         if has_phrase(block, "Best Dirt Speed"): pts += w["fit_dirt_best"]
-        if regex_found(block, r"\bFst\s*\(\d+") or " Fast " in block: pts += w["fit_dirt_fast"]
-        if regex_found(block, r"\bOff\s*\(\d+") or "Mud" in block: pts += w["fit_dirt_mud"]
+        if regex_found(block, r"\bFst\s*\(\d+") or " Fast " in (block or ""): pts += w["fit_dirt_fast"]
+        if regex_found(block, r"\bOff\s*\(\d+") or "Mud" in (block or ""): pts += w["fit_dirt_mud"]
     else:
-        if "AW" in block: pts += w["fit_aw_ok"]
+        if "AW" in (block or ""): pts += w["fit_aw_ok"]
     return pts
 
 def score_class_intent(block, w):
@@ -210,7 +201,7 @@ def score_class_intent(block, w):
     if has_phrase(block, "1st Time Clmg"): pts += w["first_time_claim"]
     if has_phrase(block, "First off claim") or has_phrase(block, "1st after clm"): pts += w["first_off_claim"]
     if has_phrase(block, "Class rise"): pts += w["class_rise"]
-    if has_phrase(block, "Protected spot") or " OC" in block or "OC " in block: pts += w["protected_spot"]
+    if has_phrase(block, "Protected spot") or " OC" in (block or "") or "OC " in (block or ""): pts += w["protected_spot"]
     return pts
 
 def score_form(block, w):
@@ -228,7 +219,7 @@ def score_equipment(block, w):
     pts = 0
     if has_phrase(block, "Blinkers On") or has_phrase(block, "Blinkers on"): pts += w["equip_blinkers"]
     if has_phrase(block, "Blinkers Off") or has_phrase(block, "Blinkers off"): pts += w["equip_blinkers"]
-    if has_phrase(block, "First-time Lasix") or " L1" in block: pts += w["equip_lasix"]
+    if has_phrase(block, "First-time Lasix") or " L1" in (block or ""): pts += w["equip_lasix"]
     if has_phrase(block, "Gelded"): pts += w["equip_geld"]
     return pts
 
@@ -284,7 +275,7 @@ def analyze_single_race_text(text, weights):
     for h in horses:
         block = h["Block"]
         score = 0.0
-        score += weights["w_prime_power"] * h["PrimePower"]
+        score += weights["w_prime_power"] * (h["PrimePower"] or DEFAULT_PP)
         score += score_class_intent(block, weights)
         score += score_form(block, weights)
         score += score_equipment(block, weights)
@@ -379,20 +370,43 @@ def build_tickets(df, meta, budget, risk="balanced"):
         flat.append({"Type": "TRI", "Legs": f"{a}-{b}-{c}", "Wager": u})
     return summary, flat
 
+# ---------- Robust race splitting ----------
+def split_pdf_into_races_robust(full_text):
+    """
+    Find the first occurrence of Race N (1..14) that is followed soon by Post Time or Purse,
+    then take text from that index to the next Race M's index.
+    This collapses multi-page races into a single chunk.
+    """
+    matches = list(re.finditer(r"\bRace\s+(\d+)\b", full_text, flags=re.IGNORECASE))
+    valid = []
+    for m in matches:
+        num = int(m.group(1))
+        if 1 <= num <= 14:
+            window = full_text[m.start(): m.start() + 3000]
+            if ("Post Time" in window) or ("Purse" in window):
+                valid.append((num, m.start()))
+    # sort by position
+    valid = sorted(valid, key=lambda x: x[1])
+    # build chunks
+    races = []
+    for i, (num, pos) in enumerate(valid):
+        end = valid[i + 1][1] if i + 1 < len(valid) else len(full_text)
+        races.append((f"Race {num}", full_text[pos:end]))
+    return races
+
 # ---------- Multi-race analyze with protection ----------
 def analyze_pdf_all(file_bytes, weights):
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         full_text = "\n".join((p.extract_text() or "") for p in pdf.pages)
 
-    races = split_pdf_into_races(full_text)
+    races = split_pdf_into_races_robust(full_text)
     results = []
-    for idx, (header, chunk) in enumerate(races):
+    for i, (header, chunk) in enumerate(races):
         try:
             df, meta = analyze_single_race_text(chunk, weights)
             if not df.empty:
                 results.append((header.strip(), df, meta))
         except Exception:
-            # Skip malformed race chunks silently
             continue
 
     if not results:
