@@ -43,9 +43,9 @@ DEF_WEIGHTS = {
 
     # Pace
     "pace_lone_speed": 10,
-    "pace_speed_help": 5,         # soft/avg pressure favors E/EP
-    "pace_closer_help": 6,        # hot pressure favors P/S
-    "pace_hot_threshold": 4,      # >= this many E/EP(>=5) = hot
+    "pace_speed_help": 5,
+    "pace_closer_help": 6,
+    "pace_hot_threshold": 4,  # >= this many E/EP(>=5) = hot
 }
 
 DEFAULT_PP = 100
@@ -72,28 +72,24 @@ UNICODE_FRACS = {"½": 0.5, "¼": 0.25, "¾": 0.75, "⅛": 0.125, "⅜": 0.375, 
 
 def parse_mixed_number(s: str) -> float:
     s = (s or "").strip()
-    # Replace unicode vulgar fractions with + decimal
+    # replace unicode vulgar fractions with + decimal
     for uf, val in UNICODE_FRACS.items():
         if uf in s:
             s = s.replace(uf, f" + {val}")
-    # Try expressions like "A + 0.5"
     if "+" in s:
         try:
             return sum(float(part.strip()) for part in s.split("+"))
         except Exception:
             pass
-    # A B/C or A-B/C
-    m = re.match(r"^\s*(\d+)[ -]+(\d+)\s*/\s*(\d+)\s*$", s)
+    m = re.match(r"^\s*(\d+)[ -]+(\d+)\s*/\s*(\d+)\s*$", s)  # A B/C or A-B/C
     if m:
-        a,b,c = map(int, m.groups())
-        return a + b/c
-    # B/C
-    m = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s*$", s)
+        a, b, c = map(int, m.groups())
+        return a + b / c
+    m = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s*$", s)  # B/C
     if m:
-        b,c = map(int, m.groups())
-        return b/c
-    # A
-    m = re.match(r"^\s*(\d+)\s*$", s)
+        b, c = map(int, m.groups())
+        return b / c
+    m = re.match(r"^\s*(\d+)\s*$", s)  # A
     if m:
         return float(m.group(1))
     try:
@@ -106,45 +102,37 @@ def miles_to_furlongs(miles: float) -> float:
 
 def furlongs_from_text(segment: str):
     seg = (segment or "")
-    # About/abt + Furlongs
     m = re.search(r"(?i)\b(about|abt)\s+([\d½¼¾⅛⅜⅝⅞]+(?:\s+\d+/\d+)?)\s*furlongs?\b", seg)
     if m:
-        num = parse_mixed_number(m.group(2)); 
+        num = parse_mixed_number(m.group(2))
         return (float(num), m.group(0)) if num is not None else (None, None)
-    # Plain Furlongs
     m = re.search(r"(?i)\b([\d½¼¾⅛⅜⅝⅞]+(?:\s+\d+/\d+)?)\s*furlongs?\b", seg)
     if m:
-        num = parse_mixed_number(m.group(1)); 
+        num = parse_mixed_number(m.group(1))
         return (float(num), m.group(0)) if num is not None else (None, None)
-    # Miles with fractions
     m = re.search(r"(?i)\b(about|abt)?\s*([\d½¼¾⅛⅜⅝⅞]+(?:\s+\d+/\d+)?)\s*miles?\b", seg)
     if m:
         num_miles = parse_mixed_number(m.group(2)); f = miles_to_furlongs(num_miles)
         return (f, m.group(0)) if f is not None else (None, None)
-    # Short '1m'
-    m = re.search(r"(?i)\b([\d]+(?:\s+\d+/\d+)?)\s*m\b", seg)
+    m = re.search(r"(?i)\b([\d]+(?:\s+\d+/\d+)?)\s*m\b", seg)  # '1m'
     if m:
         num_miles = parse_mixed_number(m.group(1)); f = miles_to_furlongs(num_miles)
         return (f, m.group(0)) if f is not None else (None, None)
-    # '6f' or '5.5f'
-    m = re.search(r"(?i)\b([\d]+(?:\.\d+)?)\s*f\b", seg)
+    m = re.search(r"(?i)\b([\d]+(?:\.\d+)?)\s*f\b", seg)  # '6f', '5.5f'
     if m:
         return (float(m.group(1)), m.group(0))
     return (None, None)
 
 def surface_from_text(segment: str):
     seg = (segment or "").lower()
-    # Parenthetical markers
     if re.search(r"\(\s*(inner|outer|widener)?\s*turf\s*\)", seg): return "TURF", "parenthetical turf"
     if re.search(r"\(\s*([^\)]*tapeta|polytrack|synthetic|all\s*weather)\s*\)", seg): return "AW", "parenthetical aw"
     if re.search(r"\(\s*dirt\s*\)", seg): return "DIRT", "parenthetical dirt"
-    # Keywords
-    if any(k in seg for k in ["inner turf","outer turf","widener turf","turf course","turf rail"]): return "TURF","turf keyword"
-    if any(k in seg for k in ["tapeta","polytrack","synthetic","all weather"," aw "]): return "AW","aw keyword"
-    if any(k in seg for k in ["main track","fast track","sloppy","muddy","good (dirt)"]): return "DIRT","dirt keyword"
-    # Fallback hints
-    if "turf" in seg: return "TURF","turf token"
-    return "DIRT","default dirt"
+    if any(k in seg for k in ["inner turf", "outer turf", "widener turf", "turf course", "turf rail"]): return "TURF", "turf keyword"
+    if any(k in seg for k in ["tapeta", "polytrack", "synthetic", "all weather", " aw "]): return "AW", "aw keyword"
+    if any(k in seg for k in ["main track", "fast track", "sloppy", "muddy", "good (dirt)"]): return "DIRT", "dirt keyword"
+    if "turf" in seg: return "TURF", "turf token"
+    return "DIRT", "default dirt"
 
 # ---------- Race meta ----------
 def infer_race_meta(text):
@@ -207,18 +195,14 @@ def extract_horses_from_text(text):
         if not looks_like_card:
             continue
 
-        # Program
         prog = parse_program_number(first)
         if not prog:
-            # fallback to sequential assignment later
-            prog = ""
+            prog = ""  # fill sequentially later
 
-        # Name (robust)
         nm = re.match(r"\s*\d+[A-Z]?\s+([A-Za-z'’\-\.]+(?:\s+[A-Za-z'’\-\.]+)*)\s*\(", first or "")
         if nm:
             name = nm.group(1).strip()
         else:
-            # fallback: use program + next token so it's never "Unknown"
             tokens = (first or "").split()
             name = f"{prog}-Horse" if prog else (tokens[1] if len(tokens) > 1 else "Horse")
 
@@ -240,9 +224,8 @@ def extract_horses_from_text(text):
 
     df = pd.DataFrame(horses)
 
-    # Ensure Prog exists and starts at 1 (no "0" ever)
+    # Ensure Prog exists and starts at 1 (no "0")
     if "Prog" not in df.columns or df["Prog"].eq("").any():
-        # fill blanks with sequential 1..N
         seq = []
         c = 1
         for v in df["Prog"].tolist():
@@ -440,29 +423,53 @@ def build_tickets(df, meta, budget, risk="balanced"):
         flat.append({"Type":"TRI","Legs":f"{a}-{b}-{c}","Wager":u})
     return summary, flat
 
-# ---------- Robust race splitting ----------
-def split_pdf_into_races_robust(full_text):
+# ---------- Robust race splitting (anchor + coalesce) ----------
+def split_pdf_into_races_robust(full_text: str):
     """
-    Collapses multi-page races into single chunks: find 'Race N' that’s followed
-    by typical header tokens, slice until next 'Race M'.
+    Robustly split the full PDF text into race-sized chunks.
+
+    - Only match 'Race N' at the start of a line (multiline)
+    - Require typical header tokens near the header
+    - If multiple chunks exist for the same race number, keep the longest
     """
     text = full_text or ""
-    matches = list(re.finditer(r"\bRace\s+(\d+)\b", text, flags=re.IGNORECASE))
-    valid = []
-    for m in matches:
-        num = int(m.group(1))
-        if 1 <= num <= 30:
-            window = text[m.start(): m.start()+4000]
-            if any(t in window for t in ["Post Time","Purse","Furlongs","Miles","About","Surface","Track"]):
-                valid.append((num, m.start()))
-    valid = sorted(valid, key=lambda x: x[1])
 
-    races = []
-    for i, (num, pos) in enumerate(valid):
-        end = valid[i+1][1] if i+1 < len(valid) else len(text)
-        chunk = text[pos:end]
-        races.append((f"Race {num}", chunk))
-    return races
+    # 1) Candidate headers at line start (avoid 'Race 1' inside 'Race 12')
+    header_iter = list(re.finditer(r"(?im)^[ \t]*Race[ \t]+(\d+)[ \t]*$", text))
+
+    # 2) Build [start,end) spans to next header
+    spans = []
+    for i, m in enumerate(header_iter):
+        num = int(m.group(1))
+        start = m.start()
+        end = header_iter[i+1].start() if i + 1 < len(header_iter) else len(text)
+        spans.append((num, start, end))
+
+    # 3) Keep spans whose first ~800 chars have header tokens
+    def has_header_tokens(chunk: str) -> bool:
+        head = chunk[:800]
+        tokens = ("Post Time", "Purse", "Furlongs", "Miles", "About", "Surface", "Track")
+        return any(t in head for t in tokens)
+
+    filtered = []
+    for num, start, end in spans:
+        chunk = text[start:end]
+        if has_header_tokens(chunk):
+            filtered.append((num, start, end, chunk))
+
+    if not filtered:
+        # Fallback to naive output (not expected often)
+        return [(f"Race {num}", text[start:end]) for (num, start, end) in spans] or [("Race", text)]
+
+    # 4) Coalesce by race number -> keep longest chunk
+    by_num = {}
+    for num, start, end, chunk in filtered:
+        cur = by_num.get(num)
+        if (cur is None) or (len(chunk) > len(cur[1])):
+            by_num[num] = (f"Race {num}", chunk)
+
+    # 5) Return ordered by race number
+    return [by_num[n] for n in sorted(by_num)]
 
 # ---------- Calibration utilities ----------
 def _program_from_row(row):
@@ -568,7 +575,7 @@ def analyze_pdf_all(file_bytes, weights):
 # =========================
 st.set_page_config(page_title="Thoroughbred Model + Ticket Builder", page_icon="🏇", layout="wide")
 st.title("🏇 All-Surface Thoroughbred Model + Ticket Builder")
-st.caption("PDF → per-race rankings for dirt/turf/AW, sprint/route. Pace-aware. Live weight sliders. Budget-aware tickets. Calibrate to finishes.")
+st.caption("PDF → per-race rankings for dirt/turf/AW, sprint/route. Pace-aware. Live weight sliders. Calibrate to finishes.")
 
 # Sidebar controls
 st.sidebar.header("Weights (live)")
@@ -607,9 +614,8 @@ if uploaded:
                 topL, topR = st.columns([3, 2])
                 with topL:
                     st.subheader(f"{name} — Rankings")
-                    # Display with 1-based index and Program column
                     df_display = df.copy()
-                    df_display.index = range(1, len(df_display) + 1)
+                    df_display.index = range(1, len(df_display) + 1)  # 1-based index
                     st.dataframe(
                         df_display[["Prog","Horse","Style","StyleRating","PrimePower","FinalScore"]],
                         use_container_width=True, height=420, key=f"df_rank_{i}"
