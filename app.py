@@ -67,40 +67,140 @@ def safe_int(x, default=None):
     except Exception:
         return default
 
+# ---------- Fraction/Distance helpers ----------
+UNICODE_FRACS = {
+    "½": 0.5, "¼": 0.25, "¾": 0.75, "⅛": 0.125, "⅜": 0.375, "⅝": 0.625, "⅞": 0.875,
+}
+
+def parse_mixed_number(s: str) -> float:
+    """
+    Parse '1 1/16', '1-1/16', '1 1/8', '5 1/2', '5½', '1¾', '1/16', etc. -> float miles or furlongs
+    """
+    s = (s or "").strip()
+    # replace unicode vulgar fractions with ascii fraction
+    for uf, val in UNICODE_FRACS.items():
+        if uf in s:
+            # '5½' -> '5 + 1/2'
+            parts = re.split(r"\s*", s.replace(uf, f" + {val}"), maxsplit=0)
+            try:
+                return sum(float(p) for p in "".join(parts).split("+"))
+            except Exception:
+                # fall through to generic parsing
+                pass
+
+    # patterns: "A B/C", "A-B/C", "B/C", "A"
+    m = re.match(r"^\s*(\d+)\s*[- ]\s*(\d+)\s*/\s*(\d+)\s*$", s)  # A B/C or A-B/C
+    if m:
+        a, b, c = map(int, m.groups())
+        return a + b / c
+    m = re.match(r"^\s*(\d+)\s+(\d+)\s*/\s*(\d+)\s*$", s)
+    if m:
+        a, b, c = map(int, m.groups())
+        return a + b / c
+    m = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s*$", s)  # B/C
+    if m:
+        b, c = map(int, m.groups())
+        return b / c
+    m = re.match(r"^\s*(\d+)\s*$", s)  # A
+    if m:
+        return float(m.group(1))
+    # fallback
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+def miles_to_furlongs(miles: float) -> float:
+    return round(miles * 8.0, 2) if miles is not None else None
+
+def furlongs_from_text(segment: str):
+    """
+    Return (furlongs: float, src_text: str) if we can parse "About 5 1/2 Furlongs" or "1 1/16 Miles (Turf)" etc.
+    """
+    seg = (segment or "")
+    # About/abt + Furlongs
+    m = re.search(r"(?i)\b(about|abt)\s+([\d½¼¾⅛⅜⅝⅞]+(?:\s+\d+/\d+)?)\s*furlongs?\b", seg)
+    if m:
+        num = parse_mixed_number(m.group(2))
+        return (float(num), m.group(0)) if num is not None else (None, None)
+
+    m = re.search(r"(?i)\b([\d½¼¾⅛⅜⅝⅞]+(?:\s+\d+/\d+)?)\s*furlongs?\b", seg)
+    if m:
+        num = parse_mixed_number(m.group(1))
+        return (float(num), m.group(0)) if num is not None else (None, None)
+
+    # Miles with fractions
+    m = re.search(r"(?i)\b(about|abt)?\s*([\d½¼¾⅛⅜⅝⅞]+(?:\s+\d+/\d+)?)\s*miles?\b", seg)
+    if m:
+        num_miles = parse_mixed_number(m.group(2))
+        f = miles_to_furlongs(num_miles)
+        return (f, m.group(0)) if f is not None else (None, None)
+
+    # Short forms: '1m', '1 1/16m', '7f'
+    m = re.search(r"(?i)\b([\d]+(?:\s+\d+/\d+)?)\s*m\b", seg)  # miles shorthand '1m'
+    if m:
+        num_miles = parse_mixed_number(m.group(1))
+        f = miles_to_furlongs(num_miles)
+        return (f, m.group(0)) if f is not None else (None, None)
+    m = re.search(r"(?i)\b([\d]+(?:\.\d+)?)\s*f\b", seg)  # '6f', '5.5f'
+    if m:
+        return (float(m.group(1)), m.group(0))
+
+    return (None, None)
+
+def surface_from_text(segment: str):
+    """
+    Infer surface from parenthetical or keywords near the header.
+    """
+    seg = (segment or "").lower()
+    # Parentheses markers "(Turf)", "(Inner Turf)", "(Dirt)"
+    pm = re.search(r"\(\s*(inner|outer|widener)?\s*turf\s*\)", seg)
+    if pm:
+        return "TURF", pm.group(0)
+    if re.search(r"\(\s*([^\)]*tapeta|polytrack|synthetic|all\s*weather)\s*\)", seg):
+        return "AW", "parenthetical AW"
+    if re.search(r"\(\s*dirt\s*\)", seg):
+        return "DIRT", "(Dirt)"
+
+    # Keywords nearby
+    if any(k in seg for k in ["inner turf", "outer turf", "widener turf", "turf course", "turf rail"]):
+        return "TURF", "turf keyword"
+    if any(k in seg for k in ["tapeta", "polytrack", "synthetic", "all weather", "aw "]):
+        return "AW", "aw keyword"
+    if any(k in seg for k in ["main track", "fast track", "sloppy", "muddy", "good (dirt)"]):
+        return "DIRT", "dirt keyword"
+
+    # If we see lots of 'turf' tokens at all
+    if "turf" in seg:
+        return "TURF", "turf token"
+    return "DIRT", "default dirt"
+
 # ---------- Race meta ----------
 def infer_race_meta(text):
-    t = (text or "").lower()
-    if "(t)" in t or "turf" in t:
-        surface = "TURF"
-    elif " all weather" in t or " synthetic" in t or " aw " in t:
-        surface = "AW"
-    else:
-        surface = "DIRT"
+    # Look only at the top ~3000 chars of the race chunk for header info
+    header = "\n".join((text or "").splitlines()[:120]).strip()
+    f, f_src = furlongs_from_text(header)
+    surface, s_src = surface_from_text(header)
 
-    head = "\n".join((text or "").splitlines()[:150]).lower()
-    furlongs = None
-    mf = re.search(r"\b(\d(?:\.\d)?)\s*f\b", head)
-    if mf:
-        furlongs = float(mf.group(1))
-    else:
-        if "1 1/16" in head or "1ˆ" in head:
-            furlongs = 8.5
-        elif "1 1/8" in head:
-            furlongs = 9.0
-        elif "1 3/8" in head:
-            furlongs = 11.0
-        elif " 1m" in head or " 1 mile" in head:
-            furlongs = 8.0
-        elif any(s in head for s in ["5½", "5 1/2"]):
-            furlongs = 5.5
-    if furlongs is None:
-        if any(tok in head for tok in ["5f","6f","7f","5½","5 1/2"]):
-            furlongs = 6.0
-        else:
-            furlongs = 8.0
+    # Robust fallback: scan a larger window if header was unhelpful
+    if f is None or surface is None:
+        window = (text or "")[:4000]
+        if f is None:
+            f, f_src2 = furlongs_from_text(window)
+            if f is not None: f_src = f_src2
+        if surface is None:
+            surface, s_src2 = surface_from_text(window)
+            if surface is not None: s_src = s_src2
 
-    dist_type = "SPRINT" if furlongs < 8.0 else "ROUTE"
-    return surface, dist_type, furlongs
+    # Final fallbacks
+    if f is None:
+        # assume one mile if we can't tell
+        f, f_src = 8.0, "fallback 1m"
+    if surface is None:
+        surface, s_src = "DIRT", "fallback dirt"
+
+    dist_type = "SPRINT" if f < 8.0 else "ROUTE"
+    return surface, dist_type, f, {"distance_src": f_src, "surface_src": s_src}
 
 # ---------- Parsing horses ----------
 def parse_style(first_line):
@@ -110,6 +210,10 @@ def parse_style(first_line):
     style = "EP" if "E/P" in m.group(1) else m.group(1)
     rating = safe_int(m.group(2), DEFAULT_STYLE[1])
     return style, rating
+
+def parse_program_number(first_line):
+    m = re.match(r"\s*(\d+[A-Z]?)\s+", first_line or "")
+    return m.group(1).strip() if m else ""
 
 def extract_prime_power(block):
     # Forgiving patterns (OCR often mangles spacing/colon)
@@ -145,17 +249,14 @@ def extract_horses_from_text(text):
         if not looks_like_card:
             continue
 
-        # Name
+        prog = parse_program_number(first)
         nm = re.match(r"\s*\d+[A-Z]?\s+([A-Za-z'’\-\. ]+)\s*\(", first or "")
         name = nm.group(1).strip() if nm else "Unknown"
-
-        # Style
         style, style_rt = parse_style(first or "")
-
-        # Prime Power (safe)
         pp = extract_prime_power(block) or DEFAULT_PP
 
         horses.append({
+            "Prog": prog,
             "Horse": name,
             "Block": block,
             "FirstLine": first,
@@ -164,10 +265,11 @@ def extract_horses_from_text(text):
             "PrimePower": pp,
         })
 
-    # Deduplicate by Horse name (PDF artifacts can duplicate)
+    # Deduplicate by Program + Horse (safer than just Horse)
     if not horses:
         return []
-    return pd.DataFrame(horses).drop_duplicates(subset=["Horse"]).to_dict("records")
+    df = pd.DataFrame(horses).drop_duplicates(subset=["Prog","Horse"])
+    return df.to_dict("records")
 
 # ---------- Pace ----------
 def build_pace_context(horses, hot_threshold=4):
@@ -192,7 +294,8 @@ def score_surface_distance_fit(block, surface, w):
         if regex_found(block, r"\bFst\s*\(\d+") or " Fast " in (block or ""): pts += w["fit_dirt_fast"]
         if regex_found(block, r"\bOff\s*\(\d+") or "Mud" in (block or ""): pts += w["fit_dirt_mud"]
     else:
-        if "AW" in (block or ""): pts += w["fit_aw_ok"]
+        if "AW" in (block or "") or "Tapeta" in (block or "") or "Polytrack" in (block or ""):
+            pts += w["fit_aw_ok"]
     return pts
 
 def score_class_intent(block, w):
@@ -260,13 +363,13 @@ def score_pace(style, dist_type, surface, pace_ctx, w):
 
 # ---------- Per-race pipeline ----------
 def analyze_single_race_text(text, weights):
-    surface, dist_type, furlongs = infer_race_meta(text)
+    surface, dist_type, furlongs, meta_src = infer_race_meta(text)
     horses = extract_horses_from_text(text)
     if not horses:
         empty_df = pd.DataFrame()
         meta = {
             "surface": surface, "distance_type": dist_type, "furlongs": furlongs,
-            "pace_pressers": 0, "lone_speed": False, "hot_pace": False
+            "pace_pressers": 0, "lone_speed": False, "hot_pace": False, **meta_src
         }
         return empty_df, meta
 
@@ -284,17 +387,21 @@ def analyze_single_race_text(text, weights):
         score += score_penalties(block, weights)
         score += score_pace(h["Style"], dist_type, surface, pace, weights)
         rows.append({
-            "Horse": h["Horse"], "Style": h["Style"], "StyleRating": h["StyleRating"],
-            "PrimePower": h["PrimePower"], "FinalScore": round(score, 2)
+            "Prog": h["Prog"],
+            "Horse": h["Horse"],
+            "Style": h["Style"],
+            "StyleRating": h["StyleRating"],
+            "PrimePower": h["PrimePower"],
+            "FinalScore": round(score, 2)
         })
 
-    df = pd.DataFrame(rows).drop_duplicates(subset=["Horse"]).sort_values(
+    df = pd.DataFrame(rows).drop_duplicates(subset=["Prog","Horse"]).sort_values(
         ["FinalScore", "PrimePower"], ascending=[False, False]
     ).reset_index(drop=True)
 
     meta = {
         "surface": surface, "distance_type": dist_type, "furlongs": furlongs,
-        "pace_pressers": pace["num_pressers"], "lone_speed": pace["lone_speed"], "hot_pace": pace["hot"]
+        "pace_pressers": pace["num_pressers"], "lone_speed": pace["lone_speed"], "hot_pace": pace["hot"], **meta_src
     }
     return df, meta
 
@@ -373,25 +480,23 @@ def build_tickets(df, meta, budget, risk="balanced"):
 # ---------- Robust race splitting ----------
 def split_pdf_into_races_robust(full_text):
     """
-    Find the first occurrence of Race N (1..14) that is followed soon by Post Time or Purse,
-    then take text from that index to the next Race M's index.
-    This collapses multi-page races into a single chunk.
+    Collapses multi-page races into single chunks: find 'Race N' that’s followed
+    near-term by 'Post Time' or 'Purse', then slice until next 'Race M'.
     """
-    matches = list(re.finditer(r"\bRace\s+(\d+)\b", full_text, flags=re.IGNORECASE))
+    matches = list(re.finditer(r"\bRace\s+(\d+)\b", full_text or "", flags=re.IGNORECASE))
     valid = []
     for m in matches:
         num = int(m.group(1))
-        if 1 <= num <= 14:
-            window = full_text[m.start(): m.start() + 3000]
-            if ("Post Time" in window) or ("Purse" in window):
+        if 1 <= num <= 20:
+            window = (full_text or "")[m.start(): m.start() + 4000]
+            if ("Post Time" in window) or ("Purse" in window) or ("Furlongs" in window) or ("Miles" in window):
                 valid.append((num, m.start()))
-    # sort by position
     valid = sorted(valid, key=lambda x: x[1])
-    # build chunks
+
     races = []
     for i, (num, pos) in enumerate(valid):
-        end = valid[i + 1][1] if i + 1 < len(valid) else len(full_text)
-        races.append((f"Race {num}", full_text[pos:end]))
+        end = valid[i + 1][1] if i + 1 < len(valid) else len(full_text or "")
+        races.append((f"Race {num}", (full_text or "")[pos:end]))
     return races
 
 # ---------- Multi-race analyze with protection ----------
@@ -410,7 +515,6 @@ def analyze_pdf_all(file_bytes, weights):
             continue
 
     if not results:
-        # Fallback single pass
         try:
             df, meta = analyze_single_race_text(full_text, weights)
             if not df.empty:
@@ -464,11 +568,17 @@ if uploaded:
                 topL, topR = st.columns([3, 2])
                 with topL:
                     st.subheader(f"{name} — Rankings")
-                    st.dataframe(df, use_container_width=True, height=420, key=f"df_rank_{i}")
+                    # Show program number & 1-based index (no '0' row)
+                    df_display = df.copy()
+                    df_display.index = range(1, len(df_display) + 1)  # 1-based
+                    st.dataframe(
+                        df_display[["Prog","Horse","Style","StyleRating","PrimePower","FinalScore"]],
+                        use_container_width=True, height=420, key=f"df_rank_{i}"
+                    )
                 with topR:
                     st.subheader("Race Meta (inferred)")
-                    st.markdown(f"- **Surface:** `{meta['surface']}`")
-                    st.markdown(f"- **Distance:** `{meta['distance_type']}` (~{meta['furlongs']}f)")
+                    st.markdown(f"- **Surface:** `{meta['surface']}`  _(source: {meta.get('surface_src','?')})_")
+                    st.markdown(f"- **Distance:** `{meta['distance_type']}` (~{meta['furlongs']}f)  _(source: {meta.get('distance_src','?')})_")
                     st.markdown(f"- **Pace pressers (E/EP≥5):** `{meta['pace_pressers']}`")
                     st.markdown(f"- **Lone Speed:** `{meta['lone_speed']}`")
                     st.markdown(f"- **Hot Pace:** `{meta['hot_pace']}`")
@@ -523,6 +633,7 @@ if uploaded:
                             f"${summary['exa_bank']} (EXA), ${summary['tri_bank']} (TRI)"
                         )
                         tdf = pd.DataFrame(flat)
+                        tdf.index = range(1, len(tdf) + 1)  # 1-based
                         st.dataframe(tdf, use_container_width=True, key=f"df_tix_{i}")
                         st.download_button(
                             "⬇️ CSV (tickets)",
