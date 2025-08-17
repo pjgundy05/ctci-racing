@@ -53,10 +53,10 @@ DEFAULT_STYLE = ("P", 3)
 HORSE_SPLIT = re.compile(r"\n(?=\s*\d+\s+[A-Za-z][^\n]+?\()")
 
 # ---------- Helpers ----------
-def has_phrase(text, phrase): 
+def has_phrase(text, phrase):
     return phrase.lower() in text.lower()
 
-def regex_found(text, pat): 
+def regex_found(text, pat):
     return re.search(pat, text, flags=re.IGNORECASE) is not None
 
 def safe_int(x, default=None):
@@ -386,13 +386,13 @@ def analyze_pdf_all(file_bytes, weights):
 
     races = split_pdf_into_races(full_text)
     results = []
-    for header, chunk in races:
+    for idx, (header, chunk) in enumerate(races):
         try:
             df, meta = analyze_single_race_text(chunk, weights)
             if not df.empty:
                 results.append((header.strip(), df, meta))
         except Exception:
-            # Skip malformed race chunks silently (optional: collect debug)
+            # Skip malformed race chunks silently
             continue
 
     if not results:
@@ -415,25 +415,25 @@ st.caption("PDF → per-race rankings for dirt/turf/AW, sprint/route. Pace-aware
 
 # Sidebar controls
 st.sidebar.header("Weights (live)")
-show_debug = st.sidebar.checkbox("Show debug info", value=False)
+show_debug = st.sidebar.checkbox("Show debug info", value=False, key="debug_toggle")
 
 w = {}
 for k, v in DEF_WEIGHTS.items():
     if isinstance(v, (int, float)):
         if k.startswith("w_"):
-            w[k] = st.sidebar.slider(k, 0.0, 2.0, float(v), 0.05)
+            w[k] = st.sidebar.slider(k, 0.0, 2.0, float(v), 0.05, key=f"w_{k}")
         elif "pen_" in k:
-            w[k] = st.sidebar.slider(k, -20, 0, int(v), 1)
+            w[k] = st.sidebar.slider(k, -20, 0, int(v), 1, key=f"w_{k}")
         elif "pace_hot_threshold" in k:
-            w[k] = st.sidebar.slider(k, 2, 8, int(v), 1)
+            w[k] = st.sidebar.slider(k, 2, 8, int(v), 1, key=f"w_{k}")
         else:
             maxv = 30 if v >= 10 else 10
             step = 1 if isinstance(v, int) else 0.5
-            w[k] = st.sidebar.slider(k, -10 if v < 0 else 0, maxv, v, step)
+            w[k] = st.sidebar.slider(k, -10 if v < 0 else 0, maxv, v, step, key=f"w_{k}")
     else:
         w[k] = v
 
-uploaded = st.file_uploader("Upload Brisnet/Equibase PDF", type=["pdf"])
+uploaded = st.file_uploader("Upload Brisnet/Equibase PDF", type=["pdf"], key="uploader_main")
 
 if uploaded:
     with st.spinner("Parsing & scoring races…"):
@@ -450,7 +450,7 @@ if uploaded:
                 topL, topR = st.columns([3, 2])
                 with topL:
                     st.subheader(f"{name} — Rankings")
-                    st.dataframe(df, use_container_width=True, height=420)
+                    st.dataframe(df, use_container_width=True, height=420, key=f"df_rank_{i}")
                 with topR:
                     st.subheader("Race Meta (inferred)")
                     st.markdown(f"- **Surface:** `{meta['surface']}`")
@@ -458,37 +458,44 @@ if uploaded:
                     st.markdown(f"- **Pace pressers (E/EP≥5):** `{meta['pace_pressers']}`")
                     st.markdown(f"- **Lone Speed:** `{meta['lone_speed']}`")
                     st.markdown(f"- **Hot Pace:** `{meta['hot_pace']}`")
-
                     if show_debug:
-                        st.caption("If something looks off, toggle weights or share a sample page to adjust regex.")
+                        st.caption("If something looks off, adjust weights or share a sample page to tune regex.")
 
-                # Downloads
+                # Downloads (unique keys per tab)
                 dl1, dl2 = st.columns(2)
                 with dl1:
                     st.download_button(
-                        "⬇️ CSV (rankings)", 
+                        "⬇️ CSV (rankings)",
                         df.to_csv(index=False).encode(),
-                        file_name=f"{name.replace(' ','_')}_rankings.csv", 
-                        mime="text/csv"
+                        file_name=f"{name.replace(' ','_')}_rankings.csv",
+                        mime="text/csv",
+                        key=f"dl_csv_rankings_{i}"
                     )
                 with dl2:
                     xbuf = io.BytesIO()
                     with pd.ExcelWriter(xbuf, engine="openpyxl") as writer:
                         df.to_excel(writer, index=False, sheet_name="Rankings")
                     st.download_button(
-                        "⬇️ Excel (rankings)", 
+                        "⬇️ Excel (rankings)",
                         xbuf.getvalue(),
                         file_name=f"{name.replace(' ','_')}_rankings.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_xlsx_rankings_{i}"
                     )
 
                 st.markdown("---")
                 st.subheader("🎟️ Ticket Builder")
                 colA, colB, colC = st.columns([1.5, 1, 1])
                 with colA:
-                    budget = st.number_input("Total budget ($)", min_value=5, max_value=1000, step=1, value=24)
+                    budget = st.number_input(
+                        "Total budget ($)", min_value=5, max_value=1000, step=1, value=24,
+                        key=f"budget_{i}"
+                    )
                 with colB:
-                    risk = st.selectbox("Risk profile", ["conservative", "balanced", "aggressive"], index=1)
+                    risk = st.selectbox(
+                        "Risk profile", ["conservative", "balanced", "aggressive"], index=1,
+                        key=f"risk_{i}"
+                    )
                 with colC:
                     go = st.button(f"Build tickets for {name}", key=f"go_{i}")
 
@@ -502,12 +509,13 @@ if uploaded:
                             f"${summary['exa_bank']} (EXA), ${summary['tri_bank']} (TRI)"
                         )
                         tdf = pd.DataFrame(flat)
-                        st.dataframe(tdf, use_container_width=True)
+                        st.dataframe(tdf, use_container_width=True, key=f"df_tix_{i}")
                         st.download_button(
-                            "⬇️ CSV (tickets)", 
+                            "⬇️ CSV (tickets)",
                             tdf.to_csv(index=False).encode(),
                             file_name=f"{name.replace(' ','_')}_tickets_{risk}_{budget}.csv",
-                            mime="text/csv"
+                            mime="text/csv",
+                            key=f"dl_csv_tickets_{i}_{risk}_{budget}"
                         )
         st.info("Tip: In Safari → Share → **Add to Home Screen** to use like an app.")
 else:
