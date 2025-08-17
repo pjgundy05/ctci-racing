@@ -1,0 +1,8 @@
+[theme]
+# App appearance
+base="light"               # "light" or "dark"
+primaryColor="#0057B8"     # main accent (links, buttons)
+backgroundColor="#FFFFFF"  # page background
+secondaryBackgroundColor="#F5F5F5"  # sidebar/cards
+textColor="#000000"        # main text
+font="sans serif"          # "sans serif", "serif", or "monospace"
