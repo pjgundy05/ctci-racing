@@ -11,16 +11,13 @@ DEFAULT_PP = 100
 DEFAULT_SPEED = 0
 DEFAULT_STYLE = "NA"
 
-DEFAULT_WEIGHTS = {
-    "prime_power": 1.0,
-    "speed": 1.0,
-}
+DEFAULT_WEIGHTS = {"prime_power": 1.0, "speed": 1.0}
 
-# Split horse "cards" – new block when a line starts with a program like "1 ", "10 ", "1A "
+# Horse card splitter: new block when a line starts with "1 ", "10 ", "1A ", etc., followed by a name and "("
 HORSE_SPLIT = re.compile(r"\n(?=\s*\d+[A-Z]?\s+[A-Za-z][^\n]+?\()")
 
 # =========================
-# Safe helpers
+# Helpers
 # =========================
 def safe_int(x, default=0):
     try:
@@ -36,14 +33,12 @@ def find_first(pattern, text, flags=re.IGNORECASE, group=1, default=None):
 # Field extractors (robust)
 # =========================
 def extract_prime_power(block: str) -> int:
-    # Brisnet: "Prime Power: 125". OCR may mangle punctuation.
     val = find_first(r"Prime\s*Power[:\s]*([\d\.]+)", block, group=1, default=None)
     if val is None:
         val = find_first(r"(?:PP|Prime\s*Powe?r)\D{0,6}(\d{2,3})", block, group=1, default=None)
     return safe_int(val, DEFAULT_PP)
 
 def extract_running_style(first_line: str, block: str) -> str:
-    # Typically "(E 5)", "(E/P 7)", "(P 3)", "(S 8)"
     style = find_first(r"\((E\/P|E|P|S)\s*\d*\)", first_line, group=1, default=None)
     if style:
         return "EP" if style.upper() == "E/P" else style.upper()
@@ -53,7 +48,6 @@ def extract_running_style(first_line: str, block: str) -> str:
     return DEFAULT_STYLE
 
 def extract_speed(block: str) -> int:
-    # Try multiple reasonable labels; default if none present.
     candidates = [
         r"Best\s+Speed\s+at\s+Dist[:\s]+(\d+)",
         r"Best\s+(?:Turf|Dirt)\s+Speed[:\s]+(\d+)",
@@ -72,37 +66,23 @@ def extract_speed(block: str) -> int:
 # Horse parsing
 # =========================
 def parse_program_and_name(first_line: str):
-    """
-    Extract program number (e.g., '1', '10', '1A') and name from the first line.
-    Fallbacks ensure no 'Unknown' names.
-    """
-    # Typical: "1 Horse Name (E 5) ..."
     m = re.match(r"\s*(\d+[A-Z]?)\s+([A-Za-z'’\-\.\d]+(?:\s+[A-Za-z'’\-\.\d]+)*)\s*\(", first_line or "")
     if m:
         return m.group(1).strip(), m.group(2).strip()
-
-    # Looser fallback: number then some words
     m = re.match(r"\s*(\d+[A-Z]?)\s+(.+)$", first_line or "")
     if m:
         prog = m.group(1).strip()
         tokens = m.group(2).split()
         name = " ".join(tokens[:3]).strip() if tokens else f"{prog}-Horse"
         return prog, name
-
-    # Ultimate fallback
     tokens = (first_line or "").split()
     prog = tokens[0] if tokens and re.match(r"^\d+[A-Z]?$", tokens[0]) else ""
     name = tokens[1] if len(tokens) > 1 else (f"{prog}-Horse" if prog else "Horse")
     return (prog or ""), name
 
 def extract_horses_from_text(text: str):
-    """
-    Split the race text into horse 'cards' and extract fields.
-    """
     if not text:
         return []
-
-    # Preferred custom splitter; fallback to blank-line split if nothing found
     blocks = HORSE_SPLIT.split(text)
     if len(blocks) <= 1:
         blocks = text.split("\n\n")
@@ -112,13 +92,12 @@ def extract_horses_from_text(text: str):
         block = (raw or "").strip()
         if not block:
             continue
-
         first_line = next((ln for ln in block.splitlines() if ln.strip()), "")
 
         looks_like_card = (
-            re.search(r"^\s*\d+[A-Z]?\s+[A-Za-z'’\-\.\d]+", first_line or "") or
-            ("Prime Power" in block) or
-            re.search(r"\((E\/P|E|P|S)\s*\d*", first_line or "", flags=re.IGNORECASE)
+            re.search(r"^\s*\d+[A-Z]?\s+[A-Za-z'’\-\.\d]+", first_line or "")
+            or ("Prime Power" in block)
+            or re.search(r"\((E\/P|E|P|S)\s*\d*", first_line or "", flags=re.IGNORECASE)
         )
         if not looks_like_card:
             continue
@@ -143,10 +122,9 @@ def extract_horses_from_text(text: str):
 
     if not horses:
         return []
-
     df = pd.DataFrame(horses)
 
-    # Fill blank program numbers sequentially 1..N (do not alter real ones like '1A')
+    # Fill blank programs sequentially (1..N) without overwriting real ones like '1A'
     if df["Prog"].eq("").any():
         seq = []
         c = 1
@@ -158,9 +136,7 @@ def extract_horses_from_text(text: str):
                 c += 1
         df["Prog"] = seq
 
-    # Drop duplicate OCR fragments
     df = df.drop_duplicates(subset=["Prog", "Horse"])
-
     return df.to_dict("records")
 
 # =========================
@@ -168,63 +144,51 @@ def extract_horses_from_text(text: str):
 # =========================
 def split_pdf_into_races_robust(full_text: str):
     """
-    Split races using multiple heuristics:
-
-    A) Primary: a line that has a distance token AND 'Purse $', with 'Post Time' on the same
-       line or within the next few lines (handles your Brisnet header like '1 Mile. ... Purse $...'
-       followed by 'Post Time: ...').
-
-    B) Secondary: classic 'Race N' at line start (allow trailing descriptor).
-
-    C) Tertiary: a 'Post Time:' line whose previous line contains distance + 'Purse $'.
-
-    We collect all candidate start line indices, dedupe nearby hits, then slice start→next start.
+    Find race starts using three anchors:
+      A) Lines starting with 'Ultimate PP' (repeated at each race in your file)
+      B) Lines containing distance + 'Purse $' with 'Post Time' nearby (0..8 lines)
+      C) Classic 'Race N' at start-of-line (fallback)
+    Then dedupe near-duplicates and slice start->next start.
+    Also require each resulting chunk to contain >= 4 horse cards; otherwise drop it.
     """
     text = full_text or ""
     lines = text.splitlines()
     n = len(lines)
 
     def has_distance(s: str) -> bool:
-        # covers "5 Furlongs", "6 Furlong", "1 Mile", "1 1/16 Miles", "1 1/8 Mile", etc.
-        return bool(re.search(
-            r"\b(?:Furlongs?|Furlong|Mile|Miles|1\s*\d+/\d+\s*Miles?)\b",
-            s, re.IGNORECASE
-        ))
+        return bool(re.search(r"\b(?:Furlongs?|Furlong|Mile|Miles|1\s*\d+/\d+\s*Miles?)\b", s, re.IGNORECASE))
 
     starts = set()
 
-    # A) Primary: distance + "Purse $" + "Post Time" nearby
+    # A) 'Ultimate PP' anchor
+    for idx, line in enumerate(lines):
+        if re.match(r"(?i)^\s*Ultimate\s*PP", line):
+            starts.add(idx)
+
+    # B) Distance + Purse + Post Time nearby
     i = 0
     while i < n:
         line = lines[i]
         if "Purse $" in line and has_distance(line):
-            window = " ".join(lines[i:min(i+8, n)])  # window size can be tuned
+            window = " ".join(lines[i:min(i+8, n)])
             if re.search(r"(?i)\bPost\s*Time\b", window):
                 starts.add(i)
                 i += 1
                 continue
         i += 1
 
-    # B) Secondary: classic "Race N" at start-of-line (allow trailing descriptor)
-    classic = list(re.finditer(r"(?im)^[ \t]*(?:Race|RACE)[ \t]+(\d{1,2})(?!\d)[ \t]*(?:[-–—].*)?$", text))
-    for m in classic:
-        pos = m.start()                       # absolute char pos
-        line_idx = text[:pos].count("\n")     # map to a line index
+    # C) Classic "Race N"
+    for m in re.finditer(r"(?im)^[ \t]*(?:Race|RACE)[ \t]+(\d{1,2})(?!\d)[ \t]*(?:[-–—].*)?$", text):
+        pos = m.start()
+        line_idx = text[:pos].count("\n")
         starts.add(line_idx)
 
-    # C) Tertiary: lines that are "Post Time:" AND previous line is distance + purse
-    for idx, line in enumerate(lines):
-        if re.search(r"(?i)\bPost\s*Time\b", line):
-            prev = lines[idx-1] if idx > 0 else ""
-            if "Purse $" in prev and has_distance(prev):
-                starts.add(idx-1)
-
+    # If no starts, fallback to one big chunk
     if not starts:
-        # Fallback: whole file as one race
         return [("Race 1", text)]
 
+    # Sort & dedupe near-duplicates (<3 lines apart)
     starts_sorted = sorted(starts)
-    # Remove very near-duplicates (< 3 lines apart) to avoid double-starts on header wraps
     deduped = []
     last = -999
     for s in starts_sorted:
@@ -232,12 +196,29 @@ def split_pdf_into_races_robust(full_text: str):
             deduped.append(s)
             last = s
 
-    races = []
+    # Slice into chunks
+    raw_chunks = []
     for k, start_idx in enumerate(deduped):
-        end_idx = deduped[k+1] if k+1 < len(deduped) else n
+        end_idx = deduped[k + 1] if k + 1 < len(deduped) else n
         chunk = "\n".join(lines[start_idx:end_idx]).strip()
-        races.append((f"Race {k+1}", chunk))
+        raw_chunks.append((k + 1, chunk))
 
+    # Filter: keep only chunks that have at least 4 horse-card boundaries
+    def horse_card_count(txt: str) -> int:
+        return len(HORSE_SPLIT.findall("\n" + txt))  # leading \n to help regex see boundary
+
+    filtered = []
+    for k, chunk in raw_chunks:
+        if horse_card_count(chunk) >= 4:
+            filtered.append((k, chunk))
+
+    # If filtering removed too many, fall back to raw_chunks
+    if len(filtered) >= 2:
+        final = filtered
+    else:
+        final = raw_chunks
+
+    races = [(f"Race {k}", chunk) for k, chunk in final]
     return races
 
 # =========================
@@ -246,29 +227,19 @@ def split_pdf_into_races_robust(full_text: str):
 def analyze_single_race_text(text: str, weights: dict):
     horses = extract_horses_from_text(text)
     df = pd.DataFrame(horses)
-
     if df.empty:
         return df, {}
 
-    # Keep program numbers as strings (so '1A' stays '1A'); ensure non-empty
     df["Prog"] = df["Prog"].astype(str)
     df.loc[df["Prog"].eq("") | df["Prog"].isna(), "Prog"] = [
         str(i + 1) for i in range((df["Prog"].eq("") | df["Prog"].isna()).sum())
     ]
+    df = df.fillna({"Style": DEFAULT_STYLE, "PrimePower": DEFAULT_PP, "Speed": DEFAULT_SPEED})
 
-    # Fill missing values
-    df = df.fillna({
-        "Style": DEFAULT_STYLE,
-        "PrimePower": DEFAULT_PP,
-        "Speed": DEFAULT_SPEED,
-    })
-
-    # Simple, stable rating
     prime_w = float(weights.get("prime_power", 1.0))
     speed_w = float(weights.get("speed", 1.0))
     df["Rating"] = prime_w * df["PrimePower"].astype(int) + speed_w * df["Speed"].astype(int)
 
-    # Sort by rating; tie-break by PrimePower
     df = df.sort_values(["Rating", "PrimePower"], ascending=[False, False]).reset_index(drop=True)
     return df, {"count": len(df)}
 
@@ -276,29 +247,28 @@ def analyze_pdf_all(file_bytes: bytes, weights: dict):
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         full_text = "\n".join((p.extract_text() or "") for p in pdf.pages)
 
-    # Diagnostics panel (before actually splitting)
-    with st.expander("🔎 Race-splitting diagnostics", expanded=False):
-        st.write("Characters in PDF text:", len(full_text))
-        preview_lines = "\n".join(full_text.splitlines()[:15])
-        st.code(preview_lines or "(no text extracted)", language="text")
-
-        test_races = split_pdf_into_races_robust(full_text)
-        st.write("Detected race chunks:", len(test_races))
-        for hdr, chunk in test_races[:20]:  # cap display
-            first_lines = "\n".join(chunk.splitlines()[:3])
-            st.code(f"{hdr}\n{first_lines}", language="text")
+    # Diagnostics BEFORE splitting
+    with st.expander("🔎 Diagnostics (race starts & first lines)", expanded=False):
+        st.write("Characters extracted:", len(full_text))
+        preview = "\n".join(full_text.splitlines()[:12])
+        st.code(preview or "(no text extracted)", language="text")
 
     races = split_pdf_into_races_robust(full_text)
 
-    # Deduplicate exact same chunk (rare, but can happen)
-    results = []
-    seen = set()
+    # Diagnostics AFTER splitting
+    with st.expander("🔎 Diagnostics (detected chunks)", expanded=False):
+        st.write("Detected race chunks:", len(races))
+        for hdr, chunk in races[:20]:
+            first_lines = "\n".join(chunk.splitlines()[:3])
+            st.code(f"{hdr}\n{first_lines}", language="text")
+
+    # Deduplicate exact chunks
+    results, seen = [], set()
     for header, chunk in races:
         sig = (header.strip(), hash(chunk))
         if sig in seen:
             continue
         seen.add(sig)
-
         df, meta = analyze_single_race_text(chunk, weights)
         if not df.empty:
             results.append((header.strip(), df, meta, chunk))
@@ -308,8 +278,8 @@ def analyze_pdf_all(file_bytes: bytes, weights: dict):
 # Streamlit UI
 # =========================
 st.set_page_config(page_title="🏇 Horse Racing Model", page_icon="🏇", layout="wide")
-st.title("🏇 Horse Racing Model (Multi-heuristic splitter)")
-st.caption("Splits by distance + 'Purse $' + nearby 'Post Time' (with classic 'Race N' fallback). One tab per race. No ‘Unknown’ horses, no ‘horse 0’.")
+st.title("🏇 Horse Racing Model — Robust Race Splitter")
+st.caption("Anchors: 'Ultimate PP' | distance + 'Purse $' + nearby 'Post Time' | classic 'Race N'. Drops tiny chunks. One tab per race.")
 
 with st.sidebar:
     st.header("Weights")
@@ -325,19 +295,16 @@ if uploaded:
         results = analyze_pdf_all(uploaded.read(), weights)
 
     if not results:
-        st.error("No races parsed. If your header format differs, expand diagnostics above and share one header line; I’ll tweak the splitter.")
+        st.error("No races parsed. Expand diagnostics to see what the splitter found; paste a header snippet and I’ll tune the anchors.")
     else:
         tabs = st.tabs([hdr for hdr, _, _, _ in results])
         for i, (hdr, df, meta, chunk) in enumerate(results):
             with tabs[i]:
                 st.subheader(f"{hdr} — Rankings")
                 df_show = df.copy()
-                df_show.index = range(1, len(df_show) + 1)  # 1-based display
-                st.dataframe(
-                    df_show[["Prog", "Horse", "Style", "PrimePower", "Speed", "Rating"]],
-                    use_container_width=True, height=420
-                )
-
+                df_show.index = range(1, len(df_show) + 1)
+                st.dataframe(df_show[["Prog", "Horse", "Style", "PrimePower", "Speed", "Rating"]],
+                             use_container_width=True, height=420)
                 st.download_button(
                     label=f"⬇️ Download {hdr} rankings (CSV)",
                     data=df_show.to_csv(index=False).encode("utf-8"),
