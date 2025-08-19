@@ -9,7 +9,7 @@ import streamlit as st
 # -----------------------------
 st.set_page_config(page_title="🏇 CTCI Horse Racing Model", page_icon="🏇", layout="wide")
 st.title("🏇 CTCI Horse Racing Model — Header-Only Splitter")
-st.caption("Splits races by finding each header’s 'Post Time' line, then the standalone race number above it. Program-line horse parsing. Keeps ALL races (no filtering).")
+st.caption("Splits races by finding each header’s 'Post Time' line, then the standalone race number above it. Program-line horse parsing. Keeps ALL races. Handles 1/1A, 2/2X, etc.")
 
 # -----------------------------
 # Globals / defaults
@@ -18,10 +18,8 @@ DEFAULT_PP = 100
 DEFAULT_SPEED = 0
 DEFAULT_STYLE = "NA"
 
-# NEW horse-card splitter:
-# A card starts at any line that begins with a program number (e.g., 1, 1A, 10) + letters (horse name).
-# No requirement for '(' on that line.
-HORSE_LINE_START = re.compile(r"(?m)^\s*\d+[A-Z]?\s+[A-Za-z]")
+# Program line starts a card: "<digits>[A-Z]?  <letters...>"
+PROG_LINE_RE = re.compile(r"(?m)^\s*\d+[A-Z]?\s+[A-Za-z]")
 
 # -----------------------------
 # Small helpers
@@ -35,6 +33,15 @@ def safe_int(x, default=0):
 def find_first(pattern, text, flags=re.IGNORECASE, group=1, default=None):
     m = re.search(pattern, text or "", flags)
     return m.group(group) if m else default
+
+def normalize_prog(s: str) -> str:
+    """Normalize program numbers like '1', '1A', '2X'. Keep letter suffix uppercased; don't merge 1 vs 1A."""
+    s = (s or "").strip().upper()
+    m = re.match(r"^(\d+)([A-Z]?)$", s)
+    if not m:
+        return s
+    num, suf = m.group(1), m.group(2)
+    return num + suf  # exact identity preserved
 
 # -----------------------------
 # Field extractors (robust & forgiving)
@@ -73,18 +80,16 @@ def extract_speed(block: str) -> int:
 # -----------------------------
 def extract_horses_from_text(text: str):
     """
-    Robust horse card segmentation:
-      - Find every line that STARTS with a program number and some name text.
-      - Use those line indices as card starts; each card runs until the next start.
-      - No dependency on '(' being on the first line.
-      - Strip trailing odds/flags from the name (e.g., '5/2 L').
+    - A card starts at any line that begins with a program number (e.g., 1, 1A, 10) + letters (horse name).
+    - Each card runs until the next program line.
+    - Strip trailing odds/flags from the name (e.g., '5/2 L').
     """
     if not text:
         return []
 
     lines = text.splitlines()
 
-    # indices of lines that look like "Prog + Name"
+    # indices of program lines
     start_idxs = []
     for i, ln in enumerate(lines):
         if re.match(r"^\s*\d+[A-Z]?\s+[A-Za-z]", ln or ""):
@@ -93,7 +98,7 @@ def extract_horses_from_text(text: str):
     if not start_idxs:
         return []
 
-    # Build card blocks
+    # Build blocks
     blocks = []
     for k, si in enumerate(start_idxs):
         ei = start_idxs[k+1] if k+1 < len(start_idxs) else len(lines)
@@ -105,13 +110,14 @@ def extract_horses_from_text(text: str):
     for block in blocks:
         first_line = next((ln for ln in block.splitlines() if ln.strip()), "")
 
-        # Program number
+        # Program number (allow A/X suffix)
         m_prog = re.match(r"^\s*(\d+[A-Z]?)\s+", first_line or "")
-        prog = m_prog.group(1).strip() if m_prog else ""
+        prog_raw = m_prog.group(1).strip() if m_prog else ""
+        prog = normalize_prog(prog_raw)
 
         # Name = everything after program number on the first line
         name = re.sub(r"^\s*\d+[A-Z]?\s+", "", first_line or "").strip()
-        # Strip trailing odds/flags like "5/2 L", "8/1", etc.
+        # Strip trailing odds/flags like "5/2 L", "12/1", etc.
         name = re.sub(r"\s+\d+/?\d+\s*[A-Za-z]*\s*$", "", name)
         name = re.sub(r"[,\s]+$","", name)
         if not name:
@@ -128,14 +134,39 @@ def extract_horses_from_text(text: str):
             "PrimePower": pp if isinstance(pp, int) else DEFAULT_PP,
             "Speed": spd if isinstance(spd, int) else DEFAULT_SPEED,
             "Block": block,
+            "NameLen": len(name),
+            "BlockLen": len(block),
         })
 
     if not horses:
         return []
 
-    df = pd.DataFrame(horses)
+    # Deduplicate ONLY within exact same program (keep best block/name)
+    by_prog = {}
+    for h in horses:
+        key = h["Prog"]  # exact identity, so 1 vs 1A vs 2X are distinct
+        if not key:
+            # stash blank-prog items under a synthetic key to dedupe later
+            key = f"__BLANK__{id(h)}"
+        prev = by_prog.get(key)
+        if prev is None:
+            by_prog[key] = h
+        else:
+            # choose the richer entry: longer block first, then longer name
+            cand = h
+            score_prev = (prev["BlockLen"], prev["NameLen"])
+            score_cand = (cand["BlockLen"], cand["NameLen"])
+            if score_cand > score_prev:
+                by_prog[key] = cand
 
-    # Fill blank programs sequentially 1..N; do not overwrite real ones like '1A'
+    horses = list(by_prog.values())
+
+    # Build DataFrame and tidy
+    df = pd.DataFrame(horses)
+    if df.empty:
+        return []
+
+    # Fill any blank programs sequentially 1..N; do not overwrite real ones like '1A' or '2X'
     if df["Prog"].eq("").any():
         seq, c = [], 1
         for v in df["Prog"].tolist():
@@ -145,9 +176,13 @@ def extract_horses_from_text(text: str):
                 seq.append(str(c)); c += 1
         df["Prog"] = seq
 
-    # Drop duplicate OCR fragments
+    # Drop duplicate (Prog, Horse) pairs (extra safety)
     df = df.drop_duplicates(subset=["Prog", "Horse"])
-    return df.to_dict("records")
+    # Ensure string type
+    df["Prog"] = df["Prog"].astype(str)
+
+    # Return records without helper columns
+    return df.drop(columns=["NameLen", "BlockLen"], errors="ignore").to_dict("records")
 
 # -----------------------------
 # HEADER-ONLY RACE SPLITTER
@@ -170,7 +205,7 @@ def split_pdf_into_races_header_only(full_text: str):
 
     post_idxs = [i for i, ln in enumerate(lines) if post_time_re.search(ln or "")]
     if not post_idxs:
-        # Fallback: try classic "Race N" at start of a line
+        # Fallback: try classic "Race N" header
         classic = []
         for i, ln in enumerate(lines):
             if re.match(r"(?i)^\s*Race\s+\d{1,2}(?:\s*[-–—].*)?$", ln or ""):
@@ -179,7 +214,7 @@ def split_pdf_into_races_header_only(full_text: str):
             return [("Race 1", text)]
         starts = sorted(classic)
     else:
-        # For each Post Time line, search upward a small window for the standalone number line
+        # For each Post Time line, search upward a small window for the standalone number
         starts = []
         for pt in post_idxs:
             found = None
@@ -189,7 +224,6 @@ def split_pdf_into_races_header_only(full_text: str):
                     break
             if found is not None:
                 starts.append(found)
-
         if not starts:
             return [("Race 1", text)]
         starts = sorted(set(starts))
@@ -220,7 +254,7 @@ def analyze_single_race_text(text: str, weights: dict):
     if df.empty:
         return df, {}
 
-    # Keep program numbers as strings (so '1A' stays '1A'); ensure non-empty
+    # Ensure non-empty Prog strings
     df["Prog"] = df["Prog"].astype(str)
     df.loc[df["Prog"].eq("") | df["Prog"].isna(), "Prog"] = [
         str(i + 1) for i in range((df["Prog"].eq("") | df["Prog"].isna()).sum())
@@ -256,7 +290,7 @@ def analyze_pdf_all(file_bytes: bytes, weights: dict):
             sample = "\n".join(chunk.splitlines()[:5])
             st.code(f"{hdr}\n{sample}", language="text")
 
-    # Deduplicate exact chunks (rare OCR quirk)
+    # Produce results; keep empty races as empty tables so you still see the tab
     results, seen = [], set()
     for header, chunk in races:
         sig = (header.strip(), hash(chunk))
@@ -264,7 +298,6 @@ def analyze_pdf_all(file_bytes: bytes, weights: dict):
             continue
         seen.add(sig)
         df, meta = analyze_single_race_text(chunk, weights)
-        # Keep all races; show an empty table if none parsed
         if df.empty:
             df = pd.DataFrame(columns=["Prog","Horse","Style","StyleRating","PrimePower","Speed","Rating"])
         results.append((header.strip(), df, meta, chunk))
