@@ -9,7 +9,7 @@ import streamlit as st
 # -----------------------------
 st.set_page_config(page_title="🏇 CTCI Horse Racing Model", page_icon="🏇", layout="wide")
 st.title("🏇 CTCI Horse Racing Model — Header-Only Splitter")
-st.caption("Splits races by finding each header’s 'Post Time' line, then the standalone race number above it. One tab per race.")
+st.caption("Splits races by finding each header’s 'Post Time' line, then the standalone race number above it. One tab per race. Keeps ALL races (no filtering).")
 
 # -----------------------------
 # Globals / defaults
@@ -18,8 +18,8 @@ DEFAULT_PP = 100
 DEFAULT_SPEED = 0
 DEFAULT_STYLE = "NA"
 
-# New horse-card splitter:
-# a new card starts when a line begins with a program number (e.g., 1, 1A, 10) + a name and "("
+# A new card starts when a line begins with a program number (e.g., 1, 1A, 10)
+# followed by a name and a "(" (which usually starts the style/ratings)
 HORSE_SPLIT = re.compile(r"\n(?=\s*\d+[A-Z]?\s+[A-Za-z][^\n]+?\()")
 
 # -----------------------------
@@ -91,7 +91,7 @@ def parse_program_and_name(first_line: str):
 def extract_horses_from_text(text: str):
     if not text:
         return []
-    # Try the stronger 'program number + name + (' splitter first
+    # Try strong splitter first
     blocks = HORSE_SPLIT.split(text)
     if len(blocks) <= 1:
         # fallback: split on blank double newline
@@ -105,9 +105,9 @@ def extract_horses_from_text(text: str):
         first_line = next((ln for ln in block.splitlines() if ln.strip()), "")
 
         looks_like_card = (
-            re.search(r"^\s*\d+[A-Z]?\s+[A-Za-z'’\-\.\d]+", first_line or "") or
-            ("Prime Power" in block) or
-            re.search(r"\((E\/P|E|P|S)\s*\d*", first_line or "", flags=re.IGNORECASE)
+            re.search(r"^\s*\d+[A-Z]?\s+[A-Za-z'’\-\.\d]+", first_line or "")
+            or ("Prime Power" in block)
+            or re.search(r"\((E\/P|E|P|S)\s*\d*", first_line or "", flags=re.IGNORECASE)
         )
         if not looks_like_card:
             continue
@@ -157,17 +157,15 @@ def split_pdf_into_races_header_only(full_text: str):
       1) Find every 'Post Time' line (appears once per race header).
       2) For each, scan UPWARD up to 12 lines to find a standalone race number line: r'^\s*\d{1,2}\s*$'.
       3) Use that number line index as the race START.
-      4) Slice start -> next start. Drop micro-chunks (< 4 horse cards).
-
-    This matches the screenshots you shared for Race 1 & Race 2.
+      4) Slice start -> next start.
+      5) KEEP ALL CHUNKS (no filtering by horse-card count).
     """
     text = full_text or ""
     lines = text.splitlines()
     n = len(lines)
 
     post_time_re = re.compile(r"(?i)\bPost\s*Time\b")
-    # A big, standalone race number (e.g., "1" on its own line)
-    solo_number_re = re.compile(r"^\s*\d{1,2}\s*$")
+    solo_number_re = re.compile(r"^\s*\d{1,2}\s*$")  # big race number on its own line
 
     post_idxs = [i for i, ln in enumerate(lines) if post_time_re.search(ln or "")]
     if not post_idxs:
@@ -203,21 +201,14 @@ def split_pdf_into_races_header_only(full_text: str):
             deduped.append(s)
             last = s
 
-    # Slice into chunks
-    raw_chunks = []
+    # Slice into chunks and KEEP ALL of them
+    races = []
     for k, start_idx in enumerate(deduped):
         end_idx = deduped[k+1] if k+1 < len(deduped) else n
         chunk = "\n".join(lines[start_idx:end_idx]).strip()
-        raw_chunks.append((k+1, chunk))
+        races.append((f"Race {k+1}", chunk))
 
-    # Keep only chunks that look like real races (>=4 horse cards)
-    def horse_card_count(txt: str) -> int:
-        return len(HORSE_SPLIT.findall("\n" + (txt or "")))
-
-    filtered = [(k, c) for (k, c) in raw_chunks if horse_card_count(c) >= 4]
-    final = filtered if len(filtered) >= 2 else raw_chunks
-
-    return [(f"Race {k}", c) for (k, c) in final]
+    return races
 
 # -----------------------------
 # Analysis
@@ -240,7 +231,6 @@ def analyze_single_race_text(text: str, weights: dict):
     # Simple, stable rating
     prime_w = float(weights.get("prime_power", 1.0))
     speed_w = float(weights.get("speed", 1.0))
-    # (Optional) small style weight
     sty_map = {"E": 7, "EP": 5, "P": 3, "S": 1}
     df["StyleRating"] = df["Style"].map(sty_map).fillna(0)
     df["Rating"] = prime_w * df["PrimePower"].astype(int) + speed_w * df["Speed"].astype(int) + 0.5 * df["StyleRating"]
@@ -273,8 +263,12 @@ def analyze_pdf_all(file_bytes: bytes, weights: dict):
             continue
         seen.add(sig)
         df, meta = analyze_single_race_text(chunk, weights)
+        # Keep all races, even if df is empty (but we won't make a tab for empty)
         if not df.empty:
             results.append((header.strip(), df, meta, chunk))
+        else:
+            # Add an empty placeholder so you still see the race tab
+            results.append((header.strip(), pd.DataFrame(columns=["Prog","Horse","Style","StyleRating","PrimePower","Speed","Rating"]), meta, chunk))
     return results
 
 # -----------------------------
@@ -303,19 +297,22 @@ if uploaded:
         for i, (hdr, df, meta, chunk) in enumerate(results):
             with tabs[i]:
                 st.subheader(f"{hdr} — Rankings")
-                df_show = df.copy()
-                df_show.index = range(1, len(df_show) + 1)
-                st.dataframe(
-                    df_show[["Prog", "Horse", "Style", "StyleRating", "PrimePower", "Speed", "Rating"]],
-                    use_container_width=True,
-                    height=440,
-                )
-                st.download_button(
-                    label=f"⬇️ Download {hdr} rankings (CSV)",
-                    data=df_show.to_csv(index=False).encode("utf-8"),
-                    file_name=f"{hdr.replace(' ','_')}_rankings.csv",
-                    mime="text/csv",
-                    key=f"dl_{i}"
-                )
+                if df.empty:
+                    st.warning("No horses parsed for this race (OCR/text extraction issue). The race was kept as requested.")
+                else:
+                    df_show = df.copy()
+                    df_show.index = range(1, len(df_show) + 1)
+                    st.dataframe(
+                        df_show[["Prog", "Horse", "Style", "StyleRating", "PrimePower", "Speed", "Rating"]],
+                        use_container_width=True,
+                        height=440,
+                    )
+                    st.download_button(
+                        label=f"⬇️ Download {hdr} rankings (CSV)",
+                        data=df_show.to_csv(index=False).encode("utf-8"),
+                        file_name=f"{hdr.replace(' ','_')}_rankings.csv",
+                        mime="text/csv",
+                        key=f"dl_{i}"
+                    )
 else:
     st.info("Upload a Brisnet PDF to begin.")
