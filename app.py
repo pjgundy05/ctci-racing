@@ -9,7 +9,7 @@ import streamlit as st
 # -----------------------------
 st.set_page_config(page_title="🏇 CTCI Horse Racing Model", page_icon="🏇", layout="wide")
 st.title("🏇 CTCI Horse Racing Model — Header-Only Splitter")
-st.caption("Splits races by finding each header’s 'Post Time' line, then the standalone race number above it. One tab per race. Keeps ALL races (no filtering).")
+st.caption("Splits races by finding each header’s 'Post Time' line, then the standalone race number above it. Program-line horse parsing. Keeps ALL races (no filtering).")
 
 # -----------------------------
 # Globals / defaults
@@ -18,9 +18,10 @@ DEFAULT_PP = 100
 DEFAULT_SPEED = 0
 DEFAULT_STYLE = "NA"
 
-# A new card starts when a line begins with a program number (e.g., 1, 1A, 10)
-# followed by a name and a "(" (which usually starts the style/ratings)
-HORSE_SPLIT = re.compile(r"\n(?=\s*\d+[A-Z]?\s+[A-Za-z][^\n]+?\()")
+# NEW horse-card splitter:
+# A card starts at any line that begins with a program number (e.g., 1, 1A, 10) + letters (horse name).
+# No requirement for '(' on that line.
+HORSE_LINE_START = re.compile(r"(?m)^\s*\d+[A-Z]?\s+[A-Za-z]")
 
 # -----------------------------
 # Small helpers
@@ -68,61 +69,61 @@ def extract_speed(block: str) -> int:
     return DEFAULT_SPEED
 
 # -----------------------------
-# Horse parsing
+# Horse parsing (program-line segmentation)
 # -----------------------------
-def parse_program_and_name(first_line: str):
-    # Typical: "5 Horse Name (E 5) ..."
-    m = re.match(r"\s*(\d+[A-Z]?)\s+([A-Za-z'’\-\.\d]+(?:\s+[A-Za-z'’\-\.\d]+)*)\s*\(", first_line or "")
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    # Looser fallback (no '(' on first line)
-    m = re.match(r"\s*(\d+[A-Z]?)\s+(.+)$", first_line or "")
-    if m:
-        prog = m.group(1).strip()
-        tokens = m.group(2).split()
-        name = " ".join(tokens[:3]).strip() if tokens else f"{prog}-Horse"
-        return prog, name
-    # Ultimate fallback
-    tokens = (first_line or "").split()
-    prog = tokens[0] if tokens and re.match(r"^\d+[A-Z]?$", tokens[0]) else ""
-    name = tokens[1] if len(tokens) > 1 else (f"{prog}-Horse" if prog else "Horse")
-    return (prog or ""), name
-
 def extract_horses_from_text(text: str):
+    """
+    Robust horse card segmentation:
+      - Find every line that STARTS with a program number and some name text.
+      - Use those line indices as card starts; each card runs until the next start.
+      - No dependency on '(' being on the first line.
+      - Strip trailing odds/flags from the name (e.g., '5/2 L').
+    """
     if not text:
         return []
-    # Try strong splitter first
-    blocks = HORSE_SPLIT.split(text)
-    if len(blocks) <= 1:
-        # fallback: split on blank double newline
-        blocks = text.split("\n\n")
+
+    lines = text.splitlines()
+
+    # indices of lines that look like "Prog + Name"
+    start_idxs = []
+    for i, ln in enumerate(lines):
+        if re.match(r"^\s*\d+[A-Z]?\s+[A-Za-z]", ln or ""):
+            start_idxs.append(i)
+
+    if not start_idxs:
+        return []
+
+    # Build card blocks
+    blocks = []
+    for k, si in enumerate(start_idxs):
+        ei = start_idxs[k+1] if k+1 < len(start_idxs) else len(lines)
+        block = "\n".join(lines[si:ei]).strip()
+        if block:
+            blocks.append(block)
 
     horses = []
-    for raw in blocks:
-        block = (raw or "").strip()
-        if not block:
-            continue
+    for block in blocks:
         first_line = next((ln for ln in block.splitlines() if ln.strip()), "")
 
-        looks_like_card = (
-            re.search(r"^\s*\d+[A-Z]?\s+[A-Za-z'’\-\.\d]+", first_line or "")
-            or ("Prime Power" in block)
-            or re.search(r"\((E\/P|E|P|S)\s*\d*", first_line or "", flags=re.IGNORECASE)
-        )
-        if not looks_like_card:
-            continue
+        # Program number
+        m_prog = re.match(r"^\s*(\d+[A-Z]?)\s+", first_line or "")
+        prog = m_prog.group(1).strip() if m_prog else ""
 
-        prog, name = parse_program_and_name(first_line)
+        # Name = everything after program number on the first line
+        name = re.sub(r"^\s*\d+[A-Z]?\s+", "", first_line or "").strip()
+        # Strip trailing odds/flags like "5/2 L", "8/1", etc.
+        name = re.sub(r"\s+\d+/?\d+\s*[A-Za-z]*\s*$", "", name)
+        name = re.sub(r"[,\s]+$","", name)
+        if not name:
+            name = f"{prog}-Horse" if prog else "Horse"
+
         style = extract_running_style(first_line, block)
-        pp = extract_prime_power(block)
-        spd = extract_speed(block)
-
-        if not prog:
-            prog = ""  # normalized below
+        pp    = extract_prime_power(block)
+        spd   = extract_speed(block)
 
         horses.append({
-            "Prog": prog,
-            "Horse": name or "Horse",
+            "Prog": prog if prog else "",
+            "Horse": name,
             "Style": style or DEFAULT_STYLE,
             "PrimePower": pp if isinstance(pp, int) else DEFAULT_PP,
             "Speed": spd if isinstance(spd, int) else DEFAULT_SPEED,
@@ -263,12 +264,10 @@ def analyze_pdf_all(file_bytes: bytes, weights: dict):
             continue
         seen.add(sig)
         df, meta = analyze_single_race_text(chunk, weights)
-        # Keep all races, even if df is empty (but we won't make a tab for empty)
-        if not df.empty:
-            results.append((header.strip(), df, meta, chunk))
-        else:
-            # Add an empty placeholder so you still see the race tab
-            results.append((header.strip(), pd.DataFrame(columns=["Prog","Horse","Style","StyleRating","PrimePower","Speed","Rating"]), meta, chunk))
+        # Keep all races; show an empty table if none parsed
+        if df.empty:
+            df = pd.DataFrame(columns=["Prog","Horse","Style","StyleRating","PrimePower","Speed","Rating"])
+        results.append((header.strip(), df, meta, chunk))
     return results
 
 # -----------------------------
