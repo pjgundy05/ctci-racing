@@ -193,16 +193,25 @@ def extract_horses_from_text(text: str) -> list[dict]:
         prog_raw = m_prog.group(1).strip() if m_prog else ""
         prog = normalize_prog(prog_raw)
 
-        # Name: everything after the program number, stopping at the first ( or $
-        # Brisnet first line: "1 HorseName (Style N) $ClaimPrice ..."
         name_raw = re.sub(r"^\s*\d+[A-Z]?\s+", "", first_line or "").strip()
-        name = re.split(r"\s+(?=[\(\$])", name_raw, maxsplit=1)[0].strip()
+
+        # Some Brisnet layouts embed ML odds between the name and style/price on line 1:
+        # e.g. "Blue Authenticity 7/2 $20,000..." or "HorseName 9/2 (E 3)..."
+        first_line_ml = re.match(
+            r"^([A-Za-z][A-Za-z0-9 '\-\.]*?)\s+(\d{1,3}/\d{1,2})\s+(?=[\(\$])",
+            name_raw,
+        )
+        if first_line_ml:
+            name = first_line_ml.group(1).strip()
+            ml = first_line_ml.group(2)
+        else:
+            # Standard layout: name runs up to ( or $; ML is start of 2nd block line
+            name = re.split(r"\s+(?=[\(\$])", name_raw, maxsplit=1)[0].strip()
+            ml = extract_morning_line(block)
+
         name = re.sub(r"[,\s]+$", "", name)
         if not name:
             name = f"{prog}-Horse" if prog else "Horse"
-
-        # ML odds: start of 2nd block line (e.g. "6/1 Owner: ...")
-        ml = extract_morning_line(block)
 
         horses.append({
             "Prog": prog if prog else "",
