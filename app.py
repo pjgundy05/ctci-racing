@@ -71,6 +71,11 @@ def extract_running_style(first_line: str, block: str) -> str:
 
 def extract_speed(block: str) -> int:
     for pat in (
+        # Brisnet format: bare speed figure immediately before Fst/Trf/AW pace rating
+        r"(\d{2,3})\s+Fst\(",
+        r"(\d{2,3})\s+Trf\(",
+        r"(\d{2,3})\s+AW\(",
+        # Generic labeled patterns
         r"Best\s+Speed\s+at\s+Dist[:\s]+(\d+)",
         r"Best\s+(?:Turf|Dirt)\s+Speed[:\s]+(\d+)",
         r"Highest\s+last\s+race\s+speed\s+rating[:\s]+(\d+)",
@@ -109,14 +114,16 @@ def extract_trainer(block: str) -> str:
     return "—"
 
 
-def extract_morning_line(suffix: str) -> str:
-    """Parse ML odds from the trailing text stripped off the horse name line."""
-    if not suffix:
-        return "—"
-    if re.search(r"(?i)\bevt\b|even", suffix):
-        return "Evn"
-    m = re.search(r"\b(\d{1,2}[-/]\d{1,2}|\d{1,3})\b", suffix)
-    return m.group(1) if m else "—"
+def extract_morning_line(block: str) -> str:
+    """ML odds appear at the start of the 2nd line of a horse block: e.g. '6/1 Owner...'"""
+    block_lines = [ln for ln in block.splitlines() if ln.strip()]
+    for ln in block_lines[1:4]:
+        if re.search(r"(?i)\bevt\b|even", ln):
+            return "Evn"
+        m = re.match(r"^\s*(\d{1,3}/\d{1,2}|\d{1,2}-\d{1})\b", ln)
+        if m:
+            return m.group(1)
+    return "—"
 
 
 def extract_days_off(block: str) -> int | None:
@@ -186,16 +193,16 @@ def extract_horses_from_text(text: str) -> list[dict]:
         prog_raw = m_prog.group(1).strip() if m_prog else ""
         prog = normalize_prog(prog_raw)
 
-        # Extract ML odds suffix BEFORE stripping it from the name
-        name = re.sub(r"^\s*\d+[A-Z]?\s+", "", first_line or "").strip()
-        ml_match = re.search(r"(\s+\d+[/\-]\d+\s*[A-Za-z]*|\s+\d+\s*[A-Za-z]*)$", name)
-        ml_suffix = ml_match.group(0) if ml_match else ""
-        ml = extract_morning_line(ml_suffix)
-
-        name = re.sub(r"\s+\d+/?\d+\s*[A-Za-z]*\s*$", "", name)
+        # Name: everything after the program number, stopping at the first ( or $
+        # Brisnet first line: "1 HorseName (Style N) $ClaimPrice ..."
+        name_raw = re.sub(r"^\s*\d+[A-Z]?\s+", "", first_line or "").strip()
+        name = re.split(r"\s+(?=[\(\$])", name_raw, maxsplit=1)[0].strip()
         name = re.sub(r"[,\s]+$", "", name)
         if not name:
             name = f"{prog}-Horse" if prog else "Horse"
+
+        # ML odds: start of 2nd block line (e.g. "6/1 Owner: ...")
+        ml = extract_morning_line(block)
 
         horses.append({
             "Prog": prog if prog else "",
