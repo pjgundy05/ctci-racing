@@ -343,7 +343,7 @@ def pace_scenario(style_counts: dict) -> tuple[str, str, dict]:
 # Layoff factor
 # ──────────────────────────────────────────────
 def layoff_factor(days_off) -> float:
-    if days_off is None:
+    if days_off is None or (isinstance(days_off, float) and pd.isna(days_off)):
         return 1.0
     if days_off <= 14:
         return 1.02
@@ -536,6 +536,7 @@ uploaded = st.file_uploader(
 )
 
 if uploaded:
+    uploaded.seek(0)  # reset on every rerun (scratch selections trigger reruns)
     with st.spinner("Parsing & scoring…"):
         results = analyze_pdf_all(uploaded.read(), weights)
 
