@@ -542,24 +542,30 @@ if uploaded:
     if not results:
         st.error("No races parsed. Open the diagnostics above to inspect what was detected.")
     else:
+        # ── Scratch controls in sidebar (always accessible on mobile) ──
+        with st.sidebar:
+            st.divider()
+            st.subheader("✂️ Scratches")
+            st.caption("Select scratched horses per race to re-rank the field.")
+            for i, (hdr, df, meta, chunk) in enumerate(results):
+                if not df.empty:
+                    horse_options = [f"#{r['Prog']} {r['Horse']}" for _, r in df.iterrows()]
+                    with st.expander(hdr):
+                        st.multiselect(
+                            "Scratched",
+                            options=horse_options,
+                            key=f"scratch_{i}",
+                            label_visibility="collapsed",
+                        )
         tabs = st.tabs([hdr for hdr, _, _, _ in results])
         for i, (hdr, df, meta, chunk) in enumerate(results):
             with tabs[i]:
-                # ── Scratch selector ──────────────────────────────
-                if not df.empty:
-                    horse_options = [f"#{r['Prog']} {r['Horse']}" for _, r in df.iterrows()]
-                    scratched = st.multiselect(
-                        "Scratches",
-                        options=horse_options,
-                        key=f"scratch_{i}",
-                        placeholder="Select scratched horses…",
-                    )
-                    if scratched:
-                        scratched_progs = {s.split()[0].lstrip("#") for s in scratched}
-                        df_active = df[~df["Prog"].isin(scratched_progs)].reset_index(drop=True)
-                        df_active, meta_active = recompute_ratings(df_active, weights)
-                    else:
-                        df_active, meta_active = df, meta
+                # Read scratches selected in the sidebar
+                scratched = st.session_state.get(f"scratch_{i}", [])
+                if scratched and not df.empty:
+                    scratched_progs = {s.split()[0].lstrip("#") for s in scratched}
+                    df_active = df[~df["Prog"].isin(scratched_progs)].reset_index(drop=True)
+                    df_active, meta_active = recompute_ratings(df_active, weights)
                 else:
                     df_active, meta_active = df, meta
 
