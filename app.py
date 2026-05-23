@@ -359,6 +359,44 @@ def layoff_factor(days_off) -> float:
 # ──────────────────────────────────────────────
 # Analysis
 # ──────────────────────────────────────────────
+def recompute_ratings(df: pd.DataFrame, weights: dict) -> tuple[pd.DataFrame, dict]:
+    """Score and rank a field. Called on initial parse and again after scratches."""
+    if df.empty:
+        return df, {}
+
+    prime_w = float(weights.get("prime_power", 1.0))
+    speed_w = float(weights.get("speed", 1.0))
+    style_w = float(weights.get("style", 0.5))
+    apply_layoff = bool(weights.get("layoff", True))
+    apply_pace = bool(weights.get("pace_scenario", True))
+
+    style_counts = df["Style"].value_counts().to_dict()
+    scenario_label, scenario_advice, pace_adj_map = pace_scenario(style_counts)
+
+    df = df.copy()
+    df["StyleRating"] = df["Style"].map(STYLE_MAP).fillna(0)
+    df["PaceAdj"] = df["Style"].map(pace_adj_map).fillna(0.0) if apply_pace else 0.0
+    df["LayoffFactor"] = df["DaysOff"].apply(layoff_factor) if apply_layoff else 1.0
+
+    base = (
+        prime_w * df["PrimePower"].astype(float)
+        + speed_w * df["Speed"].astype(float)
+        + style_w * df["StyleRating"]
+        + df["PaceAdj"] * prime_w * 5
+    )
+    df["Rating"] = (base * df["LayoffFactor"]).round(1)
+    df = df.sort_values(["Rating", "PrimePower"], ascending=[False, False]).reset_index(drop=True)
+
+    meta = {
+        "scenario": scenario_label,
+        "advice": scenario_advice,
+        "style_counts": style_counts,
+        "horse_count": len(df),
+        "pp_defaults": int((df["PrimePower"] == DEFAULT_PP).sum()),
+    }
+    return df, meta
+
+
 def analyze_single_race_text(text: str, weights: dict) -> tuple:
     horses = extract_horses_from_text(text)
     df = pd.DataFrame(horses)
@@ -378,40 +416,7 @@ def analyze_single_race_text(text: str, weights: dict) -> tuple:
         df["Prog"] = new_vals
 
     df = df.fillna({"Style": DEFAULT_STYLE, "PrimePower": DEFAULT_PP, "Speed": DEFAULT_SPEED})
-
-    prime_w = float(weights.get("prime_power", 1.0))
-    speed_w = float(weights.get("speed", 1.0))
-    style_w = float(weights.get("style", 0.5))
-    apply_layoff = bool(weights.get("layoff", True))
-    apply_pace = bool(weights.get("pace_scenario", True))
-
-    # Pace scenario adjustments
-    style_counts = df["Style"].value_counts().to_dict()
-    scenario_label, scenario_advice, pace_adj_map = pace_scenario(style_counts)
-
-    df["StyleRating"] = df["Style"].map(STYLE_MAP).fillna(0)
-    df["PaceAdj"] = df["Style"].map(pace_adj_map).fillna(0.0) if apply_pace else 0.0
-    df["LayoffFactor"] = df["DaysOff"].apply(layoff_factor) if apply_layoff else 1.0
-
-    # Rating: (PP + Speed + Style + PaceAdj scaled to PP range) × LayoffFactor
-    base = (
-        prime_w * df["PrimePower"].astype(float)
-        + speed_w * df["Speed"].astype(float)
-        + style_w * df["StyleRating"]
-        + df["PaceAdj"] * prime_w * 5
-    )
-    df["Rating"] = (base * df["LayoffFactor"]).round(1)
-
-    df = df.sort_values(["Rating", "PrimePower"], ascending=[False, False]).reset_index(drop=True)
-
-    meta = {
-        "scenario": scenario_label,
-        "advice": scenario_advice,
-        "style_counts": style_counts,
-        "horse_count": len(df),
-        "pp_defaults": int((df["PrimePower"] == DEFAULT_PP).sum()),
-    }
-    return df, meta
+    return recompute_ratings(df, weights)
 
 
 def analyze_pdf_all(file_bytes: bytes, weights: dict) -> list:
@@ -540,19 +545,36 @@ if uploaded:
         tabs = st.tabs([hdr for hdr, _, _, _ in results])
         for i, (hdr, df, meta, chunk) in enumerate(results):
             with tabs[i]:
+                # ── Scratch selector ──────────────────────────────
+                if not df.empty:
+                    horse_options = [f"#{r['Prog']} {r['Horse']}" for _, r in df.iterrows()]
+                    scratched = st.multiselect(
+                        "Scratches",
+                        options=horse_options,
+                        key=f"scratch_{i}",
+                        placeholder="Select scratched horses…",
+                    )
+                    if scratched:
+                        scratched_progs = {s.split()[0].lstrip("#") for s in scratched}
+                        df_active = df[~df["Prog"].isin(scratched_progs)].reset_index(drop=True)
+                        df_active, meta_active = recompute_ratings(df_active, weights)
+                    else:
+                        df_active, meta_active = df, meta
+                else:
+                    df_active, meta_active = df, meta
+
                 # ── Pace scenario banner ──────────────────────────
-                if meta:
+                if meta_active:
                     c1, c2 = st.columns([2, 3])
                     with c1:
-                        st.metric("Pace Scenario", meta.get("scenario", "—"))
-                        st.caption(meta.get("advice", ""))
+                        st.metric("Pace Scenario", meta_active.get("scenario", "—"))
+                        st.caption(meta_active.get("advice", ""))
                     with c2:
                         st.caption("Field pace breakdown")
-                        render_pace_breakdown(meta.get("style_counts", {}))
+                        render_pace_breakdown(meta_active.get("style_counts", {}))
 
-                    # Warn if extraction quality looks poor
-                    pp_defaults = meta.get("pp_defaults", 0)
-                    horse_count = meta.get("horse_count", 1)
+                    pp_defaults = meta_active.get("pp_defaults", 0)
+                    horse_count = meta_active.get("horse_count", 1)
                     if horse_count > 0 and pp_defaults / horse_count > 0.7:
                         st.warning(
                             f"Prime Power defaulted for {pp_defaults}/{horse_count} horses — "
@@ -563,10 +585,10 @@ if uploaded:
                 # ── Rankings table ────────────────────────────────
                 st.subheader(f"{hdr} — Rankings")
 
-                if df.empty:
-                    st.warning("No horses parsed for this race.")
+                if df_active.empty:
+                    st.warning("No horses in this race (all scratched or none parsed).")
                 else:
-                    df_show = df.copy().reset_index(drop=True)
+                    df_show = df_active.copy().reset_index(drop=True)
 
                     base_cols = ["Prog", "Horse", "ML", "Style", "PrimePower", "Speed", "DaysOff", "Rating"]
                     extra_cols = ["Jockey", "Trainer"] if show_detail else []
