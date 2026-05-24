@@ -130,14 +130,19 @@ def extract_days_off(block: str) -> int | None:
     """Return days since last race, or None if not found."""
     today = date.today()
     date_fmts = [
+        # Brisnet standard: 25Apr26, 6Mar26, 14Feb26
+        (r"\b(\d{1,2}[A-Za-z]{3}\d{2})\b", "%d%b%y"),
+        # Other common formats
         (r"\b(\d{2}/\d{2}/\d{2})\b", "%m/%d/%y"),
         (r"\b(\d{2}/\d{2}/\d{4})\b", "%m/%d/%Y"),
         (r"\b(\d{1,2}-[A-Za-z]{3}-\d{2,4})\b", "%d-%b-%y"),
         (r"\b(\d{1,2}-[A-Za-z]{3}-\d{4})\b", "%d-%b-%Y"),
         (r"\b([A-Za-z]{3}\s+\d{1,2},?\s+\d{4})\b", "%b %d, %Y"),
     ]
+    # Search from the past-performances section — skip the first line (horse summary)
+    pp_text = "\n".join(block.splitlines()[2:]) if len(block.splitlines()) > 2 else block
     for pat, fmt in date_fmts:
-        m = re.search(pat, block)
+        m = re.search(pat, pp_text)
         if m:
             try:
                 dt = datetime.strptime(m.group(1), fmt).date()
@@ -150,15 +155,17 @@ def extract_days_off(block: str) -> int | None:
 
 
 def extract_class_label(block: str) -> str:
-    """Extract broad race class: Stakes, Allowance, Claiming, Maiden, etc."""
+    """Extract current race class from the first line of the block (horse summary line).
+    Avoids false matches from past-performance entries which list prior race classes."""
+    header = "\n".join(block.splitlines()[:3])
     for pat, label in [
         (r"\b(?:G\d|Grade\s*\d|Stk|Stakes)\b", "Stakes"),
-        (r"\b(?:Alw|Allowance)\b", "Allowance"),
         (r"\b(?:OC|Optional\s*Clm)\b", "Opt Clm"),
-        (r"\b(?:Clm|Claiming)\b", "Claiming"),
+        (r"\b(?:Alw|Allowance)\b", "Allowance"),
+        (r"\$\d{2,3},\d{3}|(?:Clm|Claiming)\b", "Claiming"),
         (r"\b(?:Mdn|Maiden)\b", "Maiden"),
     ]:
-        if find_first(pat, block, group=0):
+        if find_first(pat, header, group=0):
             return label
     return "—"
 
