@@ -9,8 +9,8 @@ import streamlit as st
 # ──────────────────────────────────────────────
 # App setup
 # ──────────────────────────────────────────────
-st.set_page_config(page_title="🏇 CTCI Horse Racing Model", page_icon="🏇", layout="wide")
-st.title("🏇 CTCI Horse Racing Model")
+st.set_page_config(page_title="CTCI Horse Racing Model", page_icon=None, layout="wide")
+st.title("CTCI Horse Racing Model")
 st.caption("Brisnet PDF analyzer — ranked by configurable scoring formula")
 
 # ──────────────────────────────────────────────
@@ -553,7 +553,7 @@ if uploaded:
         # ── Scratch controls in sidebar (always accessible on mobile) ──
         with st.sidebar:
             st.divider()
-            st.subheader("✂️ Scratches")
+            st.subheader("Scratches")
             st.caption("Select scratched horses per race to re-rank the field.")
             for i, (hdr, df, meta, chunk) in enumerate(results):
                 if not df.empty:
@@ -619,7 +619,7 @@ if uploaded:
                     # ── Top picks summary ─────────────────────────
                     if len(df_show) >= 1:
                         st.markdown("**Top Picks:**")
-                        medals_emoji = ["🥇", "🥈", "🥉"]
+                        medals_emoji = ["1.", "2.", "3."]
                         pick_cols = st.columns(min(3, len(df_show)))
                         for j, col in enumerate(pick_cols):
                             row = df_show.iloc[j]
@@ -634,7 +634,7 @@ if uploaded:
 
                     # ── Download ──────────────────────────────────
                     st.download_button(
-                        label=f"⬇ Download {hdr} CSV",
+                        label=f"Download {hdr} CSV",
                         data=df_show.to_csv(index=False).encode("utf-8"),
                         file_name=f"{hdr.replace(' ', '_')}_rankings.csv",
                         mime="text/csv",
