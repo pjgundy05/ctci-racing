@@ -130,8 +130,8 @@ def extract_days_off(block: str) -> int | None:
     """Return days since last race, or None if not found."""
     today = date.today()
     date_fmts = [
-        # Brisnet standard: 25Apr26, 6Mar26, 14Feb26
-        (r"\b(\d{1,2}[A-Za-z]{3}\d{2})\b", "%d%b%y"),
+        # Brisnet standard: 25Apr26, 6Mar26, 18Feb26 — immediately followed by track code (no word boundary)
+        (r"(?<!\d)(\d{1,2}[A-Za-z]{3}\d{2})(?!\d)", "%d%b%y"),
         # Other common formats
         (r"\b(\d{2}/\d{2}/\d{2})\b", "%m/%d/%y"),
         (r"\b(\d{2}/\d{2}/\d{4})\b", "%m/%d/%Y"),
