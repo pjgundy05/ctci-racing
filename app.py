@@ -9,8 +9,8 @@ import streamlit as st
 # ──────────────────────────────────────────────
 # App setup
 # ──────────────────────────────────────────────
-st.set_page_config(page_title="CTCI Horse Racing Model", page_icon=None, layout="wide")
-st.title("CTCI Horse Racing Model")
+st.set_page_config(page_title="FormEdge", page_icon=None, layout="wide")
+st.title("FormEdge")
 st.caption("Brisnet PDF analyzer — ranked by configurable scoring formula")
 
 # ──────────────────────────────────────────────
