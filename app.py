@@ -398,7 +398,7 @@ TRACK_BIAS_ADJ: dict[int, dict[str, float]] = {
      2: {"E":  1.2, "EP":  0.6, "P": -0.3, "S": -1.2, "NA": 0.0},
 }
 
-BIAS_LABELS = {-2: "Strong Closer", -1: "Closer", 0: "Neutral", 1: "Speed", 2: "Strong Speed"}
+BIAS_LABELS = {-2: "Strong Closer", -1: "Closer", 0: "Fair", 1: "Speed", 2: "Strong Speed"}
 
 # ──────────────────────────────────────────────
 # Layoff factor
@@ -568,8 +568,8 @@ def format_days_off(x) -> str:
 with st.sidebar:
     st.header("Scoring Weights")
     weights = {
-        "prime_power": st.slider("Prime Power", 0.0, 3.0, 1.0, 0.1, key="w_pp"),
-        "speed": st.slider("Speed Figure", 0.0, 3.0, 1.0, 0.1, key="w_spd"),
+        "prime_power": st.slider("Prime Power", 0.0, 3.0, 1.5, 0.1, key="w_pp"),
+        "speed": st.slider("Speed Figure", 0.0, 3.0, 0.7, 0.1, key="w_spd"),
         "style": st.slider("Running Style", 0.0, 2.0, 0.5, 0.1, key="w_sty"),
     }
     st.divider()
@@ -585,8 +585,8 @@ with st.sidebar:
     st.divider()
     st.subheader("Track Bias")
     st.caption("Adjust if today's track is clearly favoring speed or closers.")
-    _bias_options = ["Strong Closer", "Closer", "Neutral", "Speed", "Strong Speed"]
-    _bias_val = st.select_slider("Bias", options=_bias_options, value="Neutral", key="w_bias",
+    _bias_options = ["Strong Closer", "Closer", "Fair", "Speed", "Strong Speed"]
+    _bias_val = st.select_slider("Bias", options=_bias_options, value="Fair", key="w_bias",
                                  label_visibility="collapsed")
     weights["track_bias"] = _bias_options.index(_bias_val) - 2  # maps to -2…+2
     st.divider()
