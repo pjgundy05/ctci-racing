@@ -170,6 +170,48 @@ def extract_class_label(block: str) -> str:
     return "—"
 
 
+def extract_race_info(chunk: str) -> dict:
+    """Extract distance, purse, and class from the race header (first ~15 lines)."""
+    lines = [ln for ln in chunk.splitlines()[:15] if ln.strip()]
+    header = "\n".join(lines)
+
+    # Distance: "6Furlongs", "1Mile", "1 1/16Miles", "6½Furlongs"
+    dist_m = re.search(r"(\d[\d\s½¼¾⅛/]*\s*(?:Furlong|Mile)s?)", header, re.IGNORECASE)
+    distance = dist_m.group(1).strip() if dist_m else ""
+    distance = (distance.replace("½", " 1/2").replace("¼", " 1/4")
+                .replace("¾", " 3/4").replace("⅛", " 1/8"))
+
+    # Purse
+    purse_m = re.search(r"Purse\s*\$?([\d,]+)", header, re.IGNORECASE)
+    purse = f"${int(purse_m.group(1).replace(',', '')):,}" if purse_m else ""
+
+    # Class — look on the line that also mentions the distance
+    cls_line = next((ln for ln in lines if re.search(r"(?i)Furlong|Mile", ln)), "")
+    cls = ""
+    for pat, label in [
+        (r"\b(?:G\d|Grade\s*\d|Stk|Stakes)\b", "Stakes"),
+        (r"\b(?:OC|Optional\s*Clm)\b", "Opt Clm"),
+        (r"\bMC\b|\bMdn\s*Clm\b", "Maiden Clm"),
+        (r"\bMdn\b|\bMaiden\b", "Maiden"),
+        (r"\bAlw\b|\bAllowance\b", "Allowance"),
+        (r"\bClm\b|\bClaiming\b|\$\d{2,3},\d{3}", "Claiming"),
+    ]:
+        if re.search(pat, cls_line, re.IGNORECASE):
+            cls = label
+            break
+
+    # Append claiming price when relevant
+    if cls in ("Claiming", "Maiden Clm", "Opt Clm"):
+        price_m = re.search(r"(?:Clm|MC)\s*(\d{2,6})", cls_line, re.IGNORECASE)
+        if not price_m:
+            price_m = re.search(r"\$(\d{2,3},\d{3})", cls_line)
+        if price_m:
+            val = int(price_m.group(1).replace(",", ""))
+            cls += f" ${val:,}"
+
+    return {"distance": distance, "purse": purse, "class": cls}
+
+
 # ──────────────────────────────────────────────
 # Horse parsing (program-line segmentation)
 # ──────────────────────────────────────────────
@@ -460,6 +502,7 @@ def analyze_pdf_all(file_bytes: bytes, weights: dict) -> list:
             continue
         seen.add(sig)
         df, meta = analyze_single_race_text(chunk, weights)
+        meta["race_info"] = extract_race_info(chunk)
         if df.empty:
             df = pd.DataFrame(columns=["Prog", "Horse", "ML", "Style", "PrimePower", "Speed", "DaysOff", "Rating"])
         results.append((header.strip(), df, meta, chunk))
@@ -523,7 +566,8 @@ with st.sidebar:
         help="Auto-adjust style ratings based on field pace composition",
     )
     st.divider()
-    show_detail = st.checkbox("Show Jockey / Trainer", value=False)
+    show_extra = st.checkbox("Show extra columns", value=False,
+                             help="Add Days Off, Jockey, and Trainer to the rankings table")
     st.divider()
     st.caption(
         "**Rating formula:**\n\n"
@@ -577,7 +621,22 @@ if uploaded:
                 else:
                     df_active, meta_active = df, meta
 
-                # ── Pace scenario banner ──────────────────────────
+                # ── Race header ───────────────────────────────────
+                st.subheader(hdr)
+                if meta_active:
+                    info = meta_active.get("race_info", {})
+                    horse_count = meta_active.get("horse_count", 0)
+                    info_parts = [
+                        info.get("distance", ""),
+                        info.get("class", ""),
+                        info.get("purse", ""),
+                        f"{horse_count} runners" if horse_count else "",
+                    ]
+                    info_line = " · ".join(p for p in info_parts if p)
+                    if info_line:
+                        st.caption(info_line)
+
+                # ── Pace scenario ─────────────────────────────────
                 if meta_active:
                     c1, c2 = st.columns([2, 3])
                     with c1:
@@ -588,7 +647,6 @@ if uploaded:
                         render_pace_breakdown(meta_active.get("style_counts", {}))
 
                     pp_defaults = meta_active.get("pp_defaults", 0)
-                    horse_count = meta_active.get("horse_count", 1)
                     if horse_count > 0 and pp_defaults / horse_count > 0.7:
                         st.warning(
                             f"Prime Power defaulted for {pp_defaults}/{horse_count} horses — "
@@ -596,16 +654,32 @@ if uploaded:
                         )
                     st.divider()
 
-                # ── Rankings table ────────────────────────────────
-                st.subheader(f"{hdr} — Rankings")
-
                 if df_active.empty:
                     st.warning("No horses in this race (all scratched or none parsed).")
                 else:
                     df_show = df_active.copy().reset_index(drop=True)
 
-                    base_cols = ["Prog", "Horse", "ML", "Style", "PrimePower", "Speed", "DaysOff", "Rating"]
-                    extra_cols = ["Jockey", "Trainer"] if show_detail else []
+                    # ── Top picks cards ───────────────────────────
+                    n_picks = min(3, len(df_show))
+                    pick_cols = st.columns(n_picks)
+                    rank_labels = ["1st", "2nd", "3rd"]
+                    for j in range(n_picks):
+                        row = df_show.iloc[j]
+                        with pick_cols[j]:
+                            with st.container(border=True):
+                                st.markdown(f"**{rank_labels[j]} — #{row['Prog']} {row['Horse']}**")
+                                m1, m2 = st.columns(2)
+                                m1.metric("Rating", f"{row['Rating']:.1f}")
+                                m2.metric("ML", row.get("ML", "—"))
+                                m3, m4 = st.columns(2)
+                                m3.metric("Style", row.get("Style", "—"))
+                                m4.metric("PP", f"{row.get('PrimePower', 0):.0f}")
+
+                    st.divider()
+
+                    # ── Rankings table ────────────────────────────
+                    base_cols = ["Prog", "Horse", "ML", "Style", "PrimePower", "Speed", "Rating"]
+                    extra_cols = ["DaysOff", "Jockey", "Trainer"] if show_extra else []
                     display_cols = [c for c in base_cols + extra_cols if c in df_show.columns]
 
                     df_display = df_show[display_cols].copy()
@@ -614,34 +688,20 @@ if uploaded:
                     if "DaysOff" in df_display.columns:
                         df_display["DaysOff"] = df_display["DaysOff"].apply(format_days_off)
 
-                    st.dataframe(styled_df(df_display), use_container_width=True, height=440)
-
-                    # ── Top picks summary ─────────────────────────
-                    if len(df_show) >= 1:
-                        st.markdown("**Top Picks:**")
-                        medals_emoji = ["1.", "2.", "3."]
-                        pick_cols = st.columns(min(3, len(df_show)))
-                        for j, col in enumerate(pick_cols):
-                            row = df_show.iloc[j]
-                            with col:
-                                st.markdown(f"{medals_emoji[j]} **#{row['Prog']} {row['Horse']}**")
-                                extras = []
-                                if row.get("ML", "—") != "—":
-                                    extras.append(f"ML: {row['ML']}")
-                                extras.append(f"Style: {row['Style']}")
-                                extras.append(f"Rating: {row['Rating']:.1f}")
-                                st.caption(" · ".join(extras))
+                    st.dataframe(styled_df(df_display), use_container_width=True, height=400)
 
                     # ── Download ──────────────────────────────────
-                    st.download_button(
-                        label=f"Download {hdr} CSV",
-                        data=df_show.to_csv(index=False).encode("utf-8"),
-                        file_name=f"{hdr.replace(' ', '_')}_rankings.csv",
-                        mime="text/csv",
-                        key=f"dl_{i}",
-                    )
-
-                    with st.expander("Raw extracted text for this race", expanded=False):
-                        st.code(chunk[:3000], language="text")
+                    c_dl, c_raw = st.columns([1, 1])
+                    with c_dl:
+                        st.download_button(
+                            label=f"Download {hdr} CSV",
+                            data=df_show.to_csv(index=False).encode("utf-8"),
+                            file_name=f"{hdr.replace(' ', '_')}_rankings.csv",
+                            mime="text/csv",
+                            key=f"dl_{i}",
+                        )
+                    with c_raw:
+                        with st.expander("Raw text"):
+                            st.code(chunk[:3000], language="text")
 else:
     st.info("Upload a Brisnet PDF to begin.")
