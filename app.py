@@ -335,19 +335,23 @@ def split_pdf_into_races_header_only(full_text: str) -> list[tuple[str, str]]:
     else:
         starts = []
         for pt in post_idxs:
-            for j in range(max(0, pt - 12), pt + 1):
+            # Scan up to 35 lines above Post Time for the standalone race number.
+            # Stakes races (e.g. Kentucky Derby) have long condition blocks, so 12
+            # lines was too tight and silently dropped those races.
+            found = None
+            for j in range(max(0, pt - 35), pt):
                 if solo_number_re.match(lines[j] or ""):
-                    starts.append(j)
-                    break
-        if not starts:
-            return [("Race 1", text)]
+                    found = j
+                    break  # first (highest up) standalone number is the race start
+            # Fall back to the Post Time line itself if no number found in window
+            starts.append(found if found is not None else pt)
         starts = sorted(set(starts))
 
-    # Dedupe near-duplicates (< 3 lines apart)
+    # Dedupe near-duplicates (< 5 lines apart)
     deduped: list[int] = []
     last = -999
     for s in starts:
-        if s - last > 3:
+        if s - last > 5:
             deduped.append(s)
             last = s
 
