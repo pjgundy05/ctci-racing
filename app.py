@@ -467,67 +467,55 @@ def recompute_ratings(df: pd.DataFrame, weights: dict) -> tuple[pd.DataFrame, di
     return df, meta
 
 
-def analyze_single_race_text(text: str, weights: dict) -> tuple:
-    horses = extract_horses_from_text(text)
-    df = pd.DataFrame(horses)
-    if df.empty:
-        return df, {}
+@st.cache_data(show_spinner="Parsing PDF…")
+def parse_pdf_races(file_bytes: bytes) -> tuple:
+    """Parse PDF into raw per-race DataFrames. Cached on file bytes — only reruns on new upload.
 
-    df["Prog"] = df["Prog"].astype(str)
-    mask = df["Prog"].eq("") | df["Prog"].isna()
-    if mask.any():
-        c = 1
-        new_vals = []
-        for v, m in zip(df["Prog"], mask):
-            if m:
-                new_vals.append(str(c)); c += 1
-            else:
-                new_vals.append(v)
-        df["Prog"] = new_vals
-
-    df = df.fillna({"Style": DEFAULT_STYLE, "PrimePower": DEFAULT_PP, "Speed": DEFAULT_SPEED})
-    return recompute_ratings(df, weights)
-
-
-def analyze_pdf_all(file_bytes: bytes, weights: dict) -> list:
+    Returns (full_text, error_msg, races, parsed_races) where:
+      - full_text: extracted text (for diagnostics)
+      - error_msg: non-None string if parsing failed early
+      - races: raw (header, chunk) list from splitter (for diagnostics)
+      - parsed_races: list of (header, raw_df, race_info, chunk) — no Rating column
+    """
     try:
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             full_text = "\n".join((p.extract_text() or "") for p in pdf.pages)
     except Exception as e:
-        st.error(f"Failed to read PDF: {e}")
-        return []
+        return "", str(e), [], []
 
     if not full_text.strip():
-        st.error(
-            "No text could be extracted. This PDF may be a scanned image — "
-            "only text-based Brisnet PDFs are supported."
-        )
-        return []
-
-    with st.expander("Diagnostics — header scan", expanded=False):
-        st.write(f"Characters extracted: {len(full_text):,}")
-        st.code("\n".join(full_text.splitlines()[:20]) or "(no text)", language="text")
+        return full_text, "no_text", [], []
 
     races = split_pdf_into_races_header_only(full_text)
 
-    with st.expander("Diagnostics — race chunks", expanded=False):
-        st.write(f"Detected {len(races)} race(s)")
-        for hdr, chunk in races[:20]:
-            st.code(f"{hdr}\n" + "\n".join(chunk.splitlines()[:5]), language="text")
-
-    results: list = []
+    parsed: list = []
     seen: set = set()
     for header, chunk in races:
         sig = (header.strip(), hash(chunk))
         if sig in seen:
             continue
         seen.add(sig)
-        df, meta = analyze_single_race_text(chunk, weights)
-        meta["race_info"] = extract_race_info(chunk)
+
+        horses = extract_horses_from_text(chunk)
+        df = pd.DataFrame(horses)
         if df.empty:
-            df = pd.DataFrame(columns=["Prog", "Horse", "ML", "Style", "PrimePower", "Speed", "DaysOff", "Rating"])
-        results.append((header.strip(), df, meta, chunk))
-    return results
+            df = pd.DataFrame(columns=["Prog", "Horse", "ML", "Style", "PrimePower", "Speed", "DaysOff", "Jockey", "Trainer"])
+        else:
+            df["Prog"] = df["Prog"].astype(str)
+            mask = df["Prog"].eq("") | df["Prog"].isna()
+            if mask.any():
+                c = 1
+                new_vals = []
+                for v, m in zip(df["Prog"], mask):
+                    new_vals.append(str(c) if m else v)
+                    if m:
+                        c += 1
+                df["Prog"] = new_vals
+            df = df.fillna({"Style": DEFAULT_STYLE, "PrimePower": DEFAULT_PP, "Speed": DEFAULT_SPEED})
+
+        parsed.append((header.strip(), df, extract_race_info(chunk), chunk))
+
+    return full_text, None, races, parsed
 
 
 # ──────────────────────────────────────────────
@@ -618,20 +606,35 @@ uploaded = st.file_uploader(
 
 if uploaded:
     uploaded.seek(0)  # reset on every rerun (scratch selections trigger reruns)
-    with st.spinner("Parsing & scoring…"):
-        results = analyze_pdf_all(uploaded.read(), weights)
+    full_text, parse_error, races, parsed_races = parse_pdf_races(uploaded.read())
 
-    if not results:
-        st.error("No races parsed. Open the diagnostics above to inspect what was detected.")
+    if parse_error and parse_error != "no_text":
+        st.error(f"Failed to read PDF: {parse_error}")
+    elif parse_error == "no_text":
+        st.error(
+            "No text could be extracted. This PDF may be a scanned image — "
+            "only text-based Brisnet PDFs are supported."
+        )
     else:
+        with st.expander("Diagnostics — header scan", expanded=False):
+            st.write(f"Characters extracted: {len(full_text):,}")
+            st.code("\n".join(full_text.splitlines()[:20]) or "(no text)", language="text")
+        with st.expander("Diagnostics — race chunks", expanded=False):
+            st.write(f"Detected {len(races)} race(s)")
+            for hdr, chunk in races[:20]:
+                st.code(f"{hdr}\n" + "\n".join(chunk.splitlines()[:5]), language="text")
+
+    if not parsed_races:
+        st.error("No races parsed. Open the diagnostics above to inspect what was detected.")
+    elif parse_error is None:
         # ── Scratch controls in sidebar (always accessible on mobile) ──
         with st.sidebar:
             st.divider()
             st.subheader("Scratches")
             st.caption("Select scratched horses per race to re-rank the field.")
-            for i, (hdr, df, meta, chunk) in enumerate(results):
-                if not df.empty:
-                    horse_options = [f"#{r['Prog']} {r['Horse']}" for _, r in df.iterrows()]
+            for i, (hdr, raw_df, race_info, chunk) in enumerate(parsed_races):
+                if not raw_df.empty:
+                    horse_options = [f"#{r['Prog']} {r['Horse']}" for _, r in raw_df.iterrows()]
                     with st.expander(hdr):
                         st.multiselect(
                             "Scratched",
@@ -639,17 +642,18 @@ if uploaded:
                             key=f"scratch_{i}",
                             label_visibility="collapsed",
                         )
-        tabs = st.tabs([hdr for hdr, _, _, _ in results])
-        for i, (hdr, df, meta, chunk) in enumerate(results):
+        tabs = st.tabs([hdr for hdr, _, _, _ in parsed_races])
+        for i, (hdr, raw_df, race_info, chunk) in enumerate(parsed_races):
             with tabs[i]:
-                # Read scratches selected in the sidebar
+                # Apply scratches then score — recompute_ratings is fast (no I/O)
                 scratched = st.session_state.get(f"scratch_{i}", [])
-                if scratched and not df.empty:
+                if scratched and not raw_df.empty:
                     scratched_progs = {s.split()[0].lstrip("#") for s in scratched}
-                    df_active = df[~df["Prog"].isin(scratched_progs)].reset_index(drop=True)
-                    df_active, meta_active = recompute_ratings(df_active, weights)
+                    df_to_score = raw_df[~raw_df["Prog"].isin(scratched_progs)].reset_index(drop=True)
                 else:
-                    df_active, meta_active = df, meta
+                    df_to_score = raw_df.copy()
+                df_active, meta_active = recompute_ratings(df_to_score, weights)
+                meta_active["race_info"] = race_info
 
                 # ── Race header ───────────────────────────────────
                 st.subheader(hdr)
