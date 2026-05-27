@@ -388,6 +388,18 @@ def pace_scenario(style_counts: dict) -> tuple[str, str, dict]:
     return label, advice, adj
 
 
+# Track bias: style bonus/penalty keyed by bias level (-2 … +2)
+# Positive = speed bias, negative = closer bias
+TRACK_BIAS_ADJ: dict[int, dict[str, float]] = {
+    -2: {"E": -1.2, "EP": -0.6, "P":  0.2, "S":  1.2, "NA": 0.0},
+    -1: {"E": -0.6, "EP": -0.3, "P":  0.1, "S":  0.6, "NA": 0.0},
+     0: {"E":  0.0, "EP":  0.0, "P":  0.0, "S":  0.0, "NA": 0.0},
+     1: {"E":  0.6, "EP":  0.3, "P": -0.1, "S": -0.6, "NA": 0.0},
+     2: {"E":  1.2, "EP":  0.6, "P": -0.3, "S": -1.2, "NA": 0.0},
+}
+
+BIAS_LABELS = {-2: "Strong Closer", -1: "Closer", 0: "Neutral", 1: "Speed", 2: "Strong Speed"}
+
 # ──────────────────────────────────────────────
 # Layoff factor
 # ──────────────────────────────────────────────
@@ -422,9 +434,13 @@ def recompute_ratings(df: pd.DataFrame, weights: dict) -> tuple[pd.DataFrame, di
     style_counts = df["Style"].value_counts().to_dict()
     scenario_label, scenario_advice, pace_adj_map = pace_scenario(style_counts)
 
+    track_bias = int(weights.get("track_bias", 0))
+    bias_adj_map = TRACK_BIAS_ADJ.get(track_bias, TRACK_BIAS_ADJ[0])
+
     df = df.copy()
     df["StyleRating"] = df["Style"].map(STYLE_MAP).fillna(0)
     df["PaceAdj"] = df["Style"].map(pace_adj_map).fillna(0.0) if apply_pace else 0.0
+    df["BiasAdj"] = df["Style"].map(bias_adj_map).fillna(0.0)
     df["LayoffFactor"] = df["DaysOff"].apply(layoff_factor) if apply_layoff else 1.0
 
     base = (
@@ -432,6 +448,7 @@ def recompute_ratings(df: pd.DataFrame, weights: dict) -> tuple[pd.DataFrame, di
         + speed_w * df["Speed"].astype(float)
         + style_w * df["StyleRating"]
         + df["PaceAdj"] * prime_w * 5
+        + df["BiasAdj"] * prime_w * 5
     )
     df["Rating"] = (base * df["LayoffFactor"]).round(1)
     df = df.sort_values(["Rating", "PrimePower"], ascending=[False, False]).reset_index(drop=True)
@@ -566,6 +583,13 @@ with st.sidebar:
         help="Auto-adjust style ratings based on field pace composition",
     )
     st.divider()
+    st.subheader("Track Bias")
+    st.caption("Adjust if today's track is clearly favoring speed or closers.")
+    _bias_options = ["Strong Closer", "Closer", "Neutral", "Speed", "Strong Speed"]
+    _bias_val = st.select_slider("Bias", options=_bias_options, value="Neutral", key="w_bias",
+                                 label_visibility="collapsed")
+    weights["track_bias"] = _bias_options.index(_bias_val) - 2  # maps to -2…+2
+    st.divider()
     show_extra = st.checkbox("Show extra columns", value=False,
                              help="Add Days Off, Jockey, and Trainer to the rankings table")
     st.divider()
@@ -626,11 +650,14 @@ if uploaded:
                 if meta_active:
                     info = meta_active.get("race_info", {})
                     horse_count = meta_active.get("horse_count", 0)
+                    bias_level = int(weights.get("track_bias", 0))
+                    bias_str = f"Bias: {BIAS_LABELS[bias_level]}" if bias_level != 0 else ""
                     info_parts = [
                         info.get("distance", ""),
                         info.get("class", ""),
                         info.get("purse", ""),
                         f"{horse_count} runners" if horse_count else "",
+                        bias_str,
                     ]
                     info_line = " · ".join(p for p in info_parts if p)
                     if info_line:
