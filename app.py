@@ -571,11 +571,13 @@ def format_days_off(x) -> str:
 # ──────────────────────────────────────────────
 with st.sidebar:
     st.header("Scoring Weights")
-    weights = {
-        "prime_power": st.slider("Prime Power", 0.0, 3.0, 1.5, 0.1, key="w_pp"),
-        "speed": st.slider("Speed Figure", 0.0, 3.0, 0.7, 0.1, key="w_spd"),
-        "style": st.slider("Running Style", 0.0, 2.0, 0.5, 0.1, key="w_sty"),
-    }
+    weights = {}
+    weights["prime_power"] = st.slider("Prime Power", 0.0, 3.0, 1.5, 0.1, key="w_pp")
+    st.caption("Brisnet's composite rating — already factors in speed, class, pace, and distance. The most reliable single number. Raise this if you trust the form book.")
+    weights["speed"] = st.slider("Speed Figure", 0.0, 3.0, 0.7, 0.1, key="w_spd")
+    st.caption("Raw speed from recent races. Most useful in sprints (6f and under). Lower it in routes where class and pace matter more than raw pace.")
+    weights["style"] = st.slider("Running Style", 0.0, 2.0, 0.5, 0.1, key="w_sty")
+    st.caption("Rewards E/EP horses in small fields, S horses in large fields. Works alongside pace scenario — raise this when running style is clearly decisive.")
     st.divider()
     st.subheader("Adjustments")
     weights["layoff"] = st.checkbox(
