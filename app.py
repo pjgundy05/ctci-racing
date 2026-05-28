@@ -154,6 +154,21 @@ def extract_days_off(block: str) -> int | None:
     return None
 
 
+def is_first_time_starter(block: str) -> bool:
+    """True when Life record shows 0 starts (horse has never raced)."""
+    return bool(re.search(r"Life:\s*0\s+0\s*[-–]\s*0\s*[-–]\s*0", block))
+
+
+def extract_fts_projected_pp(first_line: str) -> int:
+    """For first-time starters, Brisnet assigns a projected Fst() figure in the header line."""
+    m = re.search(r"\bFst\((\d{2,3})\)", first_line)
+    if m:
+        v = safe_int(m.group(1), DEFAULT_PP)
+        if 40 <= v <= 200:
+            return v
+    return DEFAULT_PP
+
+
 def extract_class_label(block: str) -> str:
     """Extract current race class from the first line of the block (horse summary line).
     Avoids false matches from past-performance entries which list prior race classes."""
@@ -262,14 +277,17 @@ def extract_horses_from_text(text: str) -> list[dict]:
         if not name:
             name = f"{prog}-Horse" if prog else "Horse"
 
+        fts = is_first_time_starter(block)
         horses.append({
             "Prog": prog if prog else "",
             "Horse": name,
             "ML": ml,
             "Style": extract_running_style(first_line, block),
-            "PrimePower": extract_prime_power(block),
-            "Speed": extract_speed(block),
-            "DaysOff": extract_days_off(block),
+            # FTS: use Brisnet's Fst() projected figure from the header; no workout-date days off
+            "PrimePower": extract_fts_projected_pp(first_line) if fts else extract_prime_power(block),
+            "Speed": DEFAULT_SPEED,  # FTS have no race speed; non-FTS gets overridden below
+            "DaysOff": None if fts else extract_days_off(block),
+            "FTS": fts,
             "Class": extract_class_label(block),
             "Jockey": extract_jockey(block),
             "Trainer": extract_trainer(block),
@@ -277,6 +295,8 @@ def extract_horses_from_text(text: str) -> list[dict]:
             "BlockLen": len(block),
             "NameLen": len(name),
         })
+        if not fts:
+            horses[-1]["Speed"] = extract_speed(block)
 
     if not horses:
         return []
@@ -499,7 +519,7 @@ def parse_pdf_races(file_bytes: bytes) -> tuple:
         horses = extract_horses_from_text(chunk)
         df = pd.DataFrame(horses)
         if df.empty:
-            df = pd.DataFrame(columns=["Prog", "Horse", "ML", "Style", "PrimePower", "Speed", "DaysOff", "Jockey", "Trainer"])
+            df = pd.DataFrame(columns=["Prog", "Horse", "ML", "Style", "PrimePower", "Speed", "DaysOff", "FTS", "Jockey", "Trainer"])
         else:
             df["Prog"] = df["Prog"].astype(str)
             mask = df["Prog"].eq("") | df["Prog"].isna()
@@ -511,7 +531,12 @@ def parse_pdf_races(file_bytes: bytes) -> tuple:
                     if m:
                         c += 1
                 df["Prog"] = new_vals
-            df = df.fillna({"Style": DEFAULT_STYLE, "PrimePower": DEFAULT_PP, "Speed": DEFAULT_SPEED})
+            # Only fill defaults on non-FTS horses (FTS already has correct PP from header)
+            non_fts = ~df.get("FTS", pd.Series(False, index=df.index))
+            df.loc[non_fts, "Style"] = df.loc[non_fts, "Style"].fillna(DEFAULT_STYLE)
+            df.loc[non_fts, "PrimePower"] = df.loc[non_fts, "PrimePower"].fillna(DEFAULT_PP)
+            df.loc[non_fts, "Speed"] = df.loc[non_fts, "Speed"].fillna(DEFAULT_SPEED)
+            df["FTS"] = df.get("FTS", False).fillna(False)
 
         parsed.append((header.strip(), df, extract_race_info(chunk), chunk))
 
@@ -700,11 +725,19 @@ if uploaded:
                     n_picks = min(3, len(df_show))
                     pick_cols = st.columns(n_picks)
                     rank_labels = ["1st", "2nd", "3rd"]
+                    fts_count = int(df_show.get("FTS", pd.Series(False)).sum()) if "FTS" in df_show.columns else 0
+                    if fts_count > 0:
+                        st.info(
+                            f"{fts_count} first-time starter{'s' if fts_count > 1 else ''} in this field. "
+                            "PP shows Brisnet's projected figure; Speed and Days Off are not applicable."
+                        )
+
                     for j in range(n_picks):
                         row = df_show.iloc[j]
+                        fts_tag = " *(FTS)*" if row.get("FTS") else ""
                         with pick_cols[j]:
                             with st.container(border=True):
-                                st.markdown(f"**{rank_labels[j]} — #{row['Prog']} {row['Horse']}**")
+                                st.markdown(f"**{rank_labels[j]} — #{row['Prog']} {row['Horse']}**{fts_tag}")
                                 m1, m2 = st.columns(2)
                                 m1.metric("Rating", f"{row['Rating']:.1f}")
                                 m2.metric("ML", row.get("ML", "—"))
@@ -721,6 +754,11 @@ if uploaded:
 
                     df_display = df_show[display_cols].copy()
                     df_display.index = range(1, len(df_display) + 1)
+
+                    # Tag FTS horses in the name column
+                    if "FTS" in df_show.columns and "Horse" in df_display.columns:
+                        fts_mask = df_show["FTS"].reset_index(drop=True)
+                        df_display["Horse"] = df_display["Horse"].where(~fts_mask, df_display["Horse"] + " *")
 
                     if "DaysOff" in df_display.columns:
                         df_display["DaysOff"] = df_display["DaysOff"].apply(format_days_off)
